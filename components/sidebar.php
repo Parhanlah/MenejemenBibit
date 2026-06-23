@@ -19,10 +19,11 @@
     
     <div class="flex-1 overflow-y-auto custom-scrollbar">
         <div class="h-16 flex items-center justify-between px-6 border-b border-gray-200 dark:border-gray-800 shrink-0">
-            <div class="flex items-center">
+            <a href="?page=dashboard" class="flex items-center hover:opacity-80 transition-opacity cursor-pointer">
                 <img src="https://poncotani.com/wp-content/uploads/2025/07/Graphic-ID-50x50.png" alt="Logo" class="w-8 h-8 mr-3">
                 <span class="font-bold text-xl tracking-tight text-gray-900 dark:text-white">Ponco<span class="text-gray-500 font-normal">Tani</span></span>
-            </div>
+            </a>
+            
             <button id="close-sidebar-btn" class="md:hidden text-gray-400 hover:text-gray-200">
                 <i class="fa-solid fa-xmark text-xl"></i>
             </button>
@@ -46,6 +47,7 @@
                 <ul class="space-y-1">
                     <li><a href="?page=bibit-baris" class="flex items-center px-2 py-2 text-sm rounded-lg transition-colors <?= cekAktif('bibit-baris', $halaman_aktif) ?>"><i class="fa-solid fa-chart-line w-5 text-center mr-3"></i> Bibit Baris</a></li>
                     <li><a href="?page=sebar-benih" class="flex items-center px-2 py-2 text-sm rounded-lg transition-colors <?= cekAktif('sebar-benih', $halaman_aktif) ?>"><i class="fa-solid fa-seedling w-5 text-center mr-3"></i> Sebar Benih</a></li>
+                    <li><a href="?page=calendar-operasional" class="flex items-center px-2 py-2 text-sm rounded-lg transition-colors <?= cekAktif('calendar-operasional', $halaman_aktif) ?>"><i class="fa-solid fa-calendar-check w-5 text-center mr-3"></i> Kalender Operasional</a></li>
                 </ul>
             </div>
 

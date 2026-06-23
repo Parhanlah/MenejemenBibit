@@ -48,6 +48,25 @@ if(isset($_POST['tambah_baris'])) {
     echo "<script>alert('Berhasil menambah Baris Lahan #$next_baris (12 Meter)!'); window.location.href='?page=super-admin';</script>"; exit;
 }
 
+// 4.1. PROSES HAPUS BARIS LAHAN TERAKHIR
+if(isset($_POST['hapus_baris'])) {
+    $q_max = mysqli_query($conn, "SELECT MAX(id_baris) as max_baris FROM bibit_baris");
+    $last_baris = (int)mysqli_fetch_assoc($q_max)['max_baris'];
+    
+    if($last_baris > 0) {
+        $q_cek = mysqli_query($conn, "SELECT status FROM bibit_baris WHERE id_baris='$last_baris'");
+        $r_cek = mysqli_fetch_assoc($q_cek);
+        if($r_cek && $r_cek['status'] == 'kosong') {
+            mysqli_query($conn, "DELETE FROM bibit_baris WHERE id_baris='$last_baris'");
+            echo "<script>alert('Berhasil menghapus Baris Lahan #$last_baris!'); window.location.href='?page=super-admin';</script>"; exit;
+        } else {
+            echo "<script>alert('Gagal! Baris Lahan #$last_baris tidak bisa dihapus karena statusnya tidak kosong (sedang digunakan).'); window.location.href='?page=super-admin';</script>"; exit;
+        }
+    } else {
+        echo "<script>alert('Tidak ada baris lahan yang bisa dihapus!'); window.location.href='?page=super-admin';</script>"; exit;
+    }
+}
+
 // AMBIL DATA NILAI TERKINI
 $cfg_bibit = mysqli_fetch_assoc(mysqli_query($conn, "SELECT nilai FROM pengaturan_sistem WHERE kunci='harga_bibit_global'"))['nilai'] ?? 800000;
 $cfg_jasa = mysqli_fetch_assoc(mysqli_query($conn, "SELECT nilai FROM pengaturan_sistem WHERE kunci='harga_jasa_tanam_global'"))['nilai'] ?? 1200000;
@@ -57,19 +76,15 @@ $q_var = mysqli_query($conn, "SELECT * FROM varietas_bibit ORDER BY nama_varieta
 ?>
 
 <div class="space-y-6">
-    <div>
-        <h1 class="text-xl md:text-2xl font-bold flex items-center text-red-500"><i class="fa-solid fa-shield-halved mr-3"></i> Pengaturan Inti Super Admin</h1>
-        <p class="text-[13px] text-gray-500 dark:text-[#8b949e] mt-1">Kelola ekspansi kapasitas lahan, tarif dasar global, dan pengecualian harga khusus.</p>
-    </div>
-
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div class="bg-white dark:bg-[#0d1117] p-5 rounded-xl border border-gray-200 dark:border-[#30363d] shadow-sm flex flex-col justify-between">
             <div>
                 <h3 class="text-sm font-bold text-gray-900 dark:text-white mb-2"><i class="fa-solid fa-map-location-dot text-blue-500 mr-2"></i> Kapasitas Lahan Baris</h3>
                 <p class="text-[12px] text-gray-500 mb-4">Saat ini terdaftar total <strong class="text-gray-800 dark:text-white"><?= $q_total_baris ?> Baris</strong>. Setiap penambahan baris baru otomatis diset sebagai lahan kosong sepanjang 12 meter (8 segmen).</p>
             </div>
-            <form method="POST" action="">
-                <button type="submit" name="tambah_baris" onclick="return confirm('Apakah Anda ingin mengekspansi area dengan menambah 1 baris baru?')" class="w-full bg-[#1f6feb] hover:bg-[#388bfd] text-white py-2.5 rounded-md text-[13px] font-bold transition-colors shadow-sm">+ Tambah Baris Lahan Baru</button>
+            <form method="POST" action="" class="flex gap-2">
+                <button type="submit" name="tambah_baris" onclick="return confirm('Apakah Anda ingin mengekspansi area dengan menambah 1 baris baru?')" class="flex-1 bg-[#1f6feb] hover:bg-[#388bfd] text-white py-2.5 rounded-md text-[13px] font-bold transition-colors shadow-sm">+ Tambah Baris Lahan Baru</button>
+                <button type="submit" name="hapus_baris" onclick="return confirm('PENTING!\n\nTindakan ini akan menghapus 1 baris lahan yang paling terakhir (Baris tertinggi).\nBaris hanya bisa dihapus jika statusnya KOSONG.\n\nLanjutkan penghapusan?')" class="bg-white dark:bg-[#0d1117] text-[#f85149] border border-[#f85149] hover:bg-[#f85149] hover:text-white px-4 py-2.5 rounded-md text-[13px] font-bold transition-colors shadow-sm"><i class="fa-solid fa-trash-can"></i></button>
             </form>
         </div>
 

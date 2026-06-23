@@ -35,6 +35,11 @@ if(mysqli_num_rows($cek_tabel_order) == 0) {
     if(mysqli_num_rows($cek_kolom) == 0) {
         mysqli_query($conn, "ALTER TABLE `order_bibit` ADD `harga_dasar` int(11) DEFAULT 0 AFTER `tgl_ambil`, ADD `diskon_persen` decimal(5,2) DEFAULT 0 AFTER `harga_dasar`, ADD `diskon_nominal` int(11) DEFAULT 0 AFTER `diskon_persen`, ADD `ongkir` int(11) DEFAULT 0 AFTER `diskon_nominal`, ADD `dp_dibayar` int(11) DEFAULT 0 AFTER `ongkir`");
     }
+    
+    $cek_kolom2 = mysqli_query($conn, "SHOW COLUMNS FROM `order_bibit` LIKE 'nominal_pelunasan'");
+    if(mysqli_num_rows($cek_kolom2) == 0) {
+        mysqli_query($conn, "ALTER TABLE `order_bibit` ADD `nominal_pelunasan` int(11) DEFAULT 0 AFTER `dp_dibayar`");
+    }
 }
 
 $cek_kupon = mysqli_query($conn, "SHOW TABLES LIKE 'kupon_diskon'");
@@ -171,9 +176,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['update_order'])) {
 if (isset($_GET['action']) && isset($_GET['id'])) {
     $action = $_GET['action']; $id = (int)$_GET['id'];
     if ($action == 'lunas') {
-        mysqli_query($conn, "UPDATE order_bibit SET status='lunas', tgl_lunas='$tgl_hari_ini' WHERE id='$id'");
+        mysqli_query($conn, "UPDATE order_bibit SET status='lunas', nominal_pelunasan=(total_harga - dp_dibayar), tgl_lunas='$tgl_hari_ini' WHERE id='$id'");
         echo "<script>window.location.href='?page=order-bibit&tab=data';</script>"; exit;
-    } 
+    }
     elseif ($action == 'diambil') {
         $cek_status = mysqli_query($conn, "SELECT status FROM order_bibit WHERE id='$id'");
         $d_status = mysqli_fetch_assoc($cek_status);
@@ -186,12 +191,51 @@ if (isset($_GET['action']) && isset($_GET['id'])) {
     } 
     elseif ($action == 'cancel') {
         $id_b = isset($_GET['id_b']) ? (int)$_GET['id_b'] : 0; $pjg = isset($_GET['pjg']) ? (float)$_GET['pjg'] : 0;
-        if($id_b > 0) {
-            mysqli_query($conn, "UPDATE bibit_baris SET tersedia_m = LEAST(tersedia_m + $pjg, 12.0) WHERE id_baris='$id_b'");
-            mysqli_query($conn, "UPDATE bibit_baris SET status='tumbuh' WHERE id_baris='$id_b' AND status='habis'");
+        
+        $q_cek = mysqli_query($conn, "SELECT * FROM order_bibit WHERE id='$id'");
+        if ($d_cek = mysqli_fetch_assoc($q_cek)) {
+            $status_order = $d_cek['status'];
+            // Hanya kembalikan meteran lahan jika pesanan dibatalkan sebelum diambil/selesai
+            if($id_b > 0 && $status_order != 'Selesai' && $status_order != 'diambil') {
+                mysqli_query($conn, "UPDATE bibit_baris SET tersedia_m = LEAST(tersedia_m + $pjg, 12.0) WHERE id_baris='$id_b'");
+                mysqli_query($conn, "UPDATE bibit_baris SET status='tumbuh' WHERE id_baris='$id_b' AND status='habis'");
+            }
+            
+            // Penyelamatan DP, Ongkir, dan Diskon Nominal agar tidak hilang saat baris ini dihapus
+            $dp_hilang = (int)$d_cek['dp_dibayar'];
+            $diskon_n_hilang = (int)$d_cek['diskon_nominal'];
+            $ongkir_hilang = (int)$d_cek['ongkir'];
+            
+            if($dp_hilang > 0 || $diskon_n_hilang > 0 || $ongkir_hilang > 0) {
+                $nama = mysqli_real_escape_string($conn, $d_cek['nama_customer']);
+                $hp = mysqli_real_escape_string($conn, $d_cek['no_hp']);
+                $tgl = mysqli_real_escape_string($conn, $d_cek['tgl_booking']);
+                
+                // Cari 1 baris lain dari transaksi/orang yang sama yang masih aktif
+                $q_lain = mysqli_query($conn, "SELECT id, harga_dasar, diskon_persen, diskon_nominal, ongkir, dp_dibayar FROM order_bibit WHERE nama_customer='$nama' AND no_hp='$hp' AND tgl_booking='$tgl' AND id != '$id' AND status NOT IN ('Selesai', 'Batal') ORDER BY id ASC LIMIT 1");
+                if($d_lain = mysqli_fetch_assoc($q_lain)) {
+                    $id_lain = $d_lain['id'];
+                    $new_dn = (int)$d_lain['diskon_nominal'] + $diskon_n_hilang;
+                    $new_ok = (int)$d_lain['ongkir'] + $ongkir_hilang;
+                    $new_dp = (int)$d_lain['dp_dibayar'] + $dp_hilang;
+                    
+                    // Hitung ulang total harga baris penampung
+                    $hd = (int)$d_lain['harga_dasar'];
+                    $dp_persen = (float)$d_lain['diskon_persen'];
+                    $pot_p = $hd * ($dp_persen / 100);
+                    $new_total = $hd - $pot_p - $new_dn + $new_ok;
+                    if($new_total < 0) $new_total = 0;
+                    
+                    // Hitung status lunas/booking baris penampung
+                    $st_lain = ($new_dp >= $new_total) ? "lunas" : "booking";
+                    $tgl_lns = ($st_lain == 'lunas') ? "'$tgl_hari_ini'" : "NULL";
+                    
+                    mysqli_query($conn, "UPDATE order_bibit SET diskon_nominal='$new_dn', ongkir='$new_ok', dp_dibayar='$new_dp', total_harga='$new_total', status='$st_lain', tgl_lunas=$tgl_lns WHERE id='$id_lain'");
+                }
+            }
         }
         mysqli_query($conn, "DELETE FROM order_bibit WHERE id='$id'");
-        echo "<script>alert('Order Dibatalkan! Meteran lahan dikembalikan.'); window.location.href='?page=order-bibit&tab=data';</script>"; exit;
+        echo "<script>alert('Order berhasil dihapus! (Sisa DP/Diskon dialihkan ke baris lain jika ada)'); window.location.href='?page=order-bibit&tab=data';</script>"; exit;
     }
 }
 
@@ -208,7 +252,7 @@ if (isset($_GET['action']) && $_GET['action'] == 'lunas_aktif') {
     $nama = mysqli_real_escape_string($conn, $_GET['nama']);
     
     // UPDATE SEMUA pesanan DP milik pelanggan ini menjadi LUNAS, tapi TIDAK Dihilangkan dari Transaksi Aktif
-    mysqli_query($conn, "UPDATE order_bibit SET dp_dibayar = total_harga, status = 'lunas', tgl_lunas = '$tgl_hari_ini' WHERE nama_customer = '$nama' AND no_hp = '$hp' AND status NOT IN ('Selesai', 'Batal')");
+    mysqli_query($conn, "UPDATE order_bibit SET nominal_pelunasan = (total_harga - dp_dibayar), status = 'lunas', tgl_lunas = '$tgl_hari_ini' WHERE nama_customer = '$nama' AND no_hp = '$hp' AND status NOT IN ('Selesai', 'Batal')");
     
     echo "<script>alert('Pelunasan Berhasil! Status berubah menjadi LUNAS SEMUA.\\n\\nSilakan klik tombol CETAK untuk memberikan bukti lunas kepada pelanggan, lalu klik tombol SELESAIKAN untuk membersihkan nama ini dari layar.'); window.location.href='?page=order-bibit&tab=aktif';</script>"; exit;
 }
@@ -291,6 +335,7 @@ while($r = mysqli_fetch_assoc($query_baris)) {
         <a href="?page=order-bibit&tab=baru" class="border-b-2 <?= $tab=='baru' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-solid fa-plus mr-1.5"></i> Order Baru</a>
         <a href="?page=order-bibit&tab=data" class="border-b-2 <?= $tab=='data' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-regular fa-folder-open mr-1.5"></i> Data Order</a>
         <a href="?page=order-bibit&tab=aktif" class="border-b-2 <?= $tab=='aktif' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-solid fa-users mr-1.5"></i> Transaksi Aktif</a>
+        <a href="?page=order-bibit&tab=riwayat" class="border-b-2 <?= $tab=='riwayat' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-solid fa-clock-rotate-left mr-1.5"></i> Riwayat Transaksi</a>
     </div>
 
     <?php if($tab == 'dashboard'): ?>
@@ -1051,11 +1096,12 @@ while($r = mysqli_fetch_assoc($query_baris)) {
                 alamat,
                 COUNT(id) as jml_transaksi, 
                 SUM(total_harga) as total_belanja, 
-                SUM(dp_dibayar) as total_dibayar,
-                SUM(total_harga - dp_dibayar) as sisa_tagihan,
-                GROUP_CONCAT(CONCAT('&bull; <span class=\"text-[#58a6ff] font-bold\">#', id_baris, '</span> <b>', varietas, '</b> (', (panjang_m + 0), 'm)') SEPARATOR '<br>') as detail_barang
+                SUM(dp_dibayar + nominal_pelunasan) as total_dibayar,
+                SUM(total_harga - (dp_dibayar + nominal_pelunasan)) as sisa_tagihan,
+                SUM(nominal_pelunasan) as total_pelunasan,
+                GROUP_CONCAT(CONCAT('&bull; <a href=\"?page=order-bibit&tab=data&highlight=', id, '\" class=\"hover:underline\" title=\"Klik untuk melihat rincian & status baris ini\"><span class=\"text-[#58a6ff] font-bold\">#', id_baris, '</span> <b>', varietas, '</b> (', (panjang_m + 0), 'm) <span class=\"text-[9px] uppercase font-bold ml-1 ', IF(status='lunas', 'text-[#3fb950]', IF(status='diambil', 'text-[#a371f7]', 'text-[#d29922]')), '\">[', status, ']</span></a>') SEPARATOR '<br>') as detail_barang
             FROM order_bibit 
-            WHERE status NOT IN ('Selesai', 'Batal')
+            WHERE status NOT IN ('Selesai', 'Batal') AND (tipe_order = 'Reguler' OR tipe_order IS NULL)
             GROUP BY nama_customer, no_hp 
             ORDER BY nama_customer ASC
         ");
@@ -1064,7 +1110,6 @@ while($r = mysqli_fetch_assoc($query_baris)) {
         <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
             <div>
                 <h2 class="text-base font-bold text-gray-900 dark:text-white"><i class="fa-solid fa-users text-[#3fb950] mr-2"></i> Daftar Transaksi Aktif</h2>
-                <p class="text-[12px] text-gray-500 mt-1">Rangkuman transaksi yang belum diselesaikan (diarsipkan).</p>
             </div>
             
             <div class="relative w-full md:w-64 shrink-0">
@@ -1080,7 +1125,6 @@ while($r = mysqli_fetch_assoc($query_baris)) {
                         <th class="py-3.5 px-4 w-12 text-center">NO</th>
                         <th class="py-3.5 px-4">DATA PELANGGAN</th>
                         <th class="py-3.5 px-4">DETAIL BARANG BELANJA</th>
-                        <th class="py-3.5 px-4 text-center">TOTAL NOTA</th>
                         <th class="py-3.5 px-4 text-right">AKUMULASI BELANJA</th>
                         <th class="py-3.5 px-4 text-right">TOTAL TERBAYAR</th>
                         <th class="py-3.5 px-4 text-right">SISA BAYAR</th>
@@ -1126,9 +1170,24 @@ while($r = mysqli_fetch_assoc($query_baris)) {
                                             <i class="fa-solid fa-check-double"></i> Selesaikan
                                         </a>
                                     <?php endif; ?>
-                                    <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rk['no_hp']) ?>&nama=<?= urlencode($rk['nama_customer']) ?>" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#0F314F] hover:bg-[#1a4a75] text-white rounded text-[11px] font-bold transition-colors shadow-sm">
-                                        <i class="fa-solid fa-print"></i> Cetak
-                                    </a>
+                                    <?php if($hutang > 0): ?>
+                                        <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rk['no_hp']) ?>&nama=<?= urlencode($rk['nama_customer']) ?>&jenis=dp" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#0F314F] hover:bg-[#1a4a75] text-white rounded text-[11px] font-bold transition-colors shadow-sm">
+                                            <i class="fa-solid fa-print"></i> Cetak DP
+                                        </a>
+                                    <?php else: ?>
+                                        <?php if($rk['total_pelunasan'] > 0): ?>
+                                            <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rk['no_hp']) ?>&nama=<?= urlencode($rk['nama_customer']) ?>&jenis=dp" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#d29922] hover:bg-[#b0801b] text-white rounded text-[11px] font-bold transition-colors shadow-sm">
+                                                <i class="fa-solid fa-print"></i> Cetak DP
+                                            </a>
+                                            <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rk['no_hp']) ?>&nama=<?= urlencode($rk['nama_customer']) ?>&jenis=lunas" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#3fb950] hover:bg-[#2ea043] text-white rounded text-[11px] font-bold transition-colors shadow-sm">
+                                                <i class="fa-solid fa-print"></i> Cetak Pelunasan
+                                            </a>
+                                        <?php else: ?>
+                                            <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rk['no_hp']) ?>&nama=<?= urlencode($rk['nama_customer']) ?>" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#0F314F] hover:bg-[#1a4a75] text-white rounded text-[11px] font-bold transition-colors shadow-sm">
+                                                <i class="fa-solid fa-print"></i> Cetak Invoice
+                                            </a>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
                                 </div>
                             </td>
                         </tr>
@@ -1148,6 +1207,109 @@ while($r = mysqli_fetch_assoc($query_baris)) {
             searchAktif.addEventListener('input', function() {
                 let val = this.value.toLowerCase();
                 barisAktif.forEach(row => {
+                    let nama = row.getAttribute('data-nama');
+                    row.style.display = nama.includes(val) ? '' : 'none';
+                });
+            });
+        }
+    </script>
+    
+    <?php elseif($tab == 'riwayat'): ?>
+    <!-- ==================== TABEL RIWAYAT TRANSAKSI ==================== -->
+    <?php
+        $q_riwayat = mysqli_query($conn, "
+            SELECT 
+                nama_customer, 
+                no_hp, 
+                tgl_lunas,
+                COUNT(id) as jml_transaksi, 
+                SUM(total_harga) as total_belanja, 
+                SUM(nominal_pelunasan) as total_pelunasan,
+                GROUP_CONCAT(CONCAT('&bull; <a href=\"?page=order-bibit&tab=data&highlight=', id, '\" class=\"hover:underline\" title=\"Klik untuk melihat rincian baris ini\"><span class=\"text-[#58a6ff] font-bold\">#', id_baris, '</span> <b>', varietas, '</b> (', (panjang_m + 0), 'm)</a>') SEPARATOR '<br>') as detail_barang
+            FROM order_bibit 
+            WHERE status = 'Selesai' AND (tipe_order = 'Reguler' OR tipe_order IS NULL)
+            GROUP BY nama_customer, no_hp, tgl_lunas 
+            ORDER BY tgl_lunas DESC, nama_customer ASC
+        ");
+    ?>
+    <div class="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-[#30363d] p-5 rounded-xl shadow-sm overflow-hidden animate-in fade-in zoom-in duration-300">
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+            <div>
+                <h2 class="text-base font-bold text-gray-900 dark:text-white"><i class="fa-solid fa-clock-rotate-left text-[#3fb950] mr-2"></i> Riwayat Transaksi</h2>
+                <p class="text-[12px] text-gray-500 mt-1">Daftar riwayat transaksi.</p>
+            </div>
+            
+            <div class="relative w-full md:w-64 shrink-0">
+                <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 text-sm"></i>
+                <input type="text" id="searchRiwayat" placeholder="Cari riwayat..." class="w-full pl-9 pr-4 py-2 bg-gray-50 dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded-md focus:outline-none focus:border-[#3fb950] text-[13px] shadow-sm">
+            </div>
+        </div>
+        
+        <div class="overflow-x-auto border border-gray-200 dark:border-[#30363d] rounded-lg custom-scrollbar">
+            <table class="w-full text-left border-collapse min-w-max">
+                <thead class="bg-gray-50 dark:bg-[#0d1117] border-b border-gray-200 dark:border-[#30363d]">
+                    <tr class="text-[10px] font-bold text-gray-500 dark:text-[#8b949e] uppercase tracking-wider">
+                        <th class="py-3.5 px-4 w-12 text-center">NO</th>
+                        <th class="py-3.5 px-4">TANGGAL LUNAS</th>
+                        <th class="py-3.5 px-4">DATA PELANGGAN</th>
+                        <th class="py-3.5 px-4">DETAIL BARANG BELANJA</th>
+                        <th class="py-3.5 px-4 text-center">TOTAL BARIS</th>
+                        <th class="py-3.5 px-4 text-right">TOTAL BELANJA</th>
+                        <th class="py-3.5 px-4 text-center">AKSI</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-[#21262d] text-[12px] bg-white dark:bg-[#161b22]">
+                    <?php if(mysqli_num_rows($q_riwayat) > 0): ?>
+                        <?php $no = 1; while($rw = mysqli_fetch_assoc($q_riwayat)): ?>
+                        <tr class="hover:bg-gray-50 dark:hover:bg-[#21262d] transition-colors baris-riwayat" data-nama="<?= strtolower(htmlspecialchars($rw['nama_customer'])) ?>">
+                            <td class="py-4 px-4 text-center text-gray-500 font-bold" style="vertical-align: top; padding-top: 20px;"><?= $no++ ?></td>
+                            <td class="py-4 px-4" style="vertical-align: top; padding-top: 18px;">
+                                <p class="font-bold text-gray-900 dark:text-white text-[13px] mb-0.5"><?= formatTgl($rw['tgl_lunas']) ?></p>
+                            </td>
+                            <td class="py-4 px-4" style="vertical-align: top; padding-top: 18px;">
+                                <p class="font-bold text-gray-900 dark:text-white text-[13px] mb-0.5"><?= ucwords(htmlspecialchars($rw['nama_customer'])) ?></p>
+                                <p class="text-[10px] text-gray-500"><i class="fa-solid fa-phone mr-1"></i> <?= htmlspecialchars($rw['no_hp']) ?: '-' ?></p>
+                            </td>
+                            <td class="py-4 px-4 text-[11px] text-gray-700 dark:text-[#c9d1d9] leading-relaxed" style="vertical-align: top; padding-top: 18px;">
+                                <?= $rw['detail_barang'] ?>
+                            </td>
+                            <td class="py-4 px-4 text-center" style="vertical-align: top; padding-top: 18px;">
+                                <span class="bg-gray-200 dark:bg-[#30363d] text-gray-600 dark:text-gray-300 px-2 py-1 rounded font-bold"><?= $rw['jml_transaksi'] ?> Baris</span>
+                            </td>
+                            <td class="py-4 px-4 text-right font-bold text-gray-800 dark:text-white" style="vertical-align: top; padding-top: 18px;">
+                                <?= formatRp($rw['total_belanja']) ?>
+                            </td>
+                            <td class="py-4 px-4 text-center" style="vertical-align: top; padding-top: 16px;">
+                                <?php if($rw['total_pelunasan'] > 0): ?>
+                                    <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rw['no_hp']) ?>&nama=<?= urlencode($rw['nama_customer']) ?>&tgl=<?= $rw['tgl_lunas'] ?>&is_history=1&jenis=dp" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#d29922] hover:bg-[#b0801b] text-white rounded text-[11px] font-bold transition-colors shadow-sm mb-1 w-full justify-center">
+                                        <i class="fa-solid fa-print"></i> Cetak DP
+                                    </a>
+                                    <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rw['no_hp']) ?>&nama=<?= urlencode($rw['nama_customer']) ?>&tgl=<?= $rw['tgl_lunas'] ?>&is_history=1&jenis=lunas" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#3fb950] hover:bg-[#2ea043] text-white rounded text-[11px] font-bold transition-colors shadow-sm w-full justify-center">
+                                        <i class="fa-solid fa-print"></i> Cetak Pelunasan
+                                    </a>
+                                <?php else: ?>
+                                    <a href="cetak/invoice-bibit.php?hp=<?= urlencode($rw['no_hp']) ?>&nama=<?= urlencode($rw['nama_customer']) ?>&tgl=<?= $rw['tgl_lunas'] ?>&is_history=1" target="_blank" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#0F314F] hover:bg-[#1a4a75] text-white rounded text-[11px] font-bold transition-colors shadow-sm">
+                                        <i class="fa-solid fa-print"></i> Cetak Invoice
+                                    </a>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endwhile; ?>
+                    <?php else: ?>
+                        <tr><td colspan="7" class="text-center py-10 text-gray-500 italic">Belum ada riwayat transaksi yang selesai.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script>
+        const searchRiwayat = document.getElementById('searchRiwayat');
+        const barisRiwayat = document.querySelectorAll('.baris-riwayat');
+        if(searchRiwayat) {
+            searchRiwayat.addEventListener('input', function() {
+                let val = this.value.toLowerCase();
+                barisRiwayat.forEach(row => {
                     let nama = row.getAttribute('data-nama');
                     row.style.display = nama.includes(val) ? '' : 'none';
                 });

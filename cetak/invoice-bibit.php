@@ -5,6 +5,7 @@ include '../components/koneksi.php';
 // Ambil parameter dari URL khusus Bibit (berdasarkan Nama & HP)
 $nama_pelanggan = isset($_GET['nama']) ? mysqli_real_escape_string($conn, $_GET['nama']) : '';
 $no_hp = isset($_GET['hp']) ? mysqli_real_escape_string($conn, $_GET['hp']) : '';
+$jenis_cetak = isset($_GET['jenis']) ? $_GET['jenis'] : '';
 
 if(!$nama_pelanggan) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>404 - Data Tidak Ditemukan</h1><p>Parameter pelanggan tidak valid.</p></div>");
 
@@ -48,9 +49,17 @@ function terbilang($nilai) {
 // =========================================================================================
 // LOGIKA CERDAS PENCARIAN DATA MULTI-ITEM BIBIT
 // =========================================================================================
-// Tarik semua transaksi aktif pelanggan (ABAIKAN YG SELESAI/BATAL)
-$q_orders = mysqli_query($conn, "SELECT * FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND status NOT IN ('Selesai', 'Batal') ORDER BY tgl_booking ASC, id ASC");
-if(mysqli_num_rows($q_orders) == 0) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>Data Kosong</h1><p>Tidak ada riwayat transaksi aktif untuk pelanggan ini. Semua pesanan mungkin sudah diselesaikan/diarsipkan.</p></div>");
+$tgl_lunas_history = isset($_GET['tgl']) ? mysqli_real_escape_string($conn, $_GET['tgl']) : '';
+$is_history = isset($_GET['is_history']) ? true : false;
+
+// Tarik semua transaksi aktif pelanggan (ABAIKAN YG SELESAI/BATAL), ATAU tarik transaksi spesifik jika dari riwayat
+if ($is_history && $tgl_lunas_history) {
+    $q_orders = mysqli_query($conn, "SELECT * FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND status='Selesai' AND tgl_lunas='$tgl_lunas_history' ORDER BY id ASC");
+    if(mysqli_num_rows($q_orders) == 0) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>Data Kosong</h1><p>Tidak ada riwayat transaksi selesai untuk pelanggan ini pada tanggal tersebut.</p></div>");
+} else {
+    $q_orders = mysqli_query($conn, "SELECT * FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND status NOT IN ('Selesai', 'Batal') ORDER BY tgl_booking ASC, id ASC");
+    if(mysqli_num_rows($q_orders) == 0) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>Data Kosong</h1><p>Tidak ada riwayat transaksi aktif untuk pelanggan ini. Semua pesanan mungkin sudah diselesaikan/diarsipkan.</p></div>");
+}
 
 $grouped_orders = [];
 while($tr = mysqli_fetch_assoc($q_orders)) {
@@ -68,6 +77,7 @@ while($tr = mysqli_fetch_assoc($q_orders)) {
         $grouped_orders[$key]['sum_ongkir'] = (int)$tr['ongkir'];
         $grouped_orders[$key]['sum_total_harga'] = (int)$tr['total_harga'];
         $grouped_orders[$key]['sum_dp_dibayar'] = (int)$tr['dp_dibayar'];
+        $grouped_orders[$key]['sum_nominal_pelunasan'] = (int)$tr['nominal_pelunasan'];
     } else {
         $grouped_orders[$key]['baris_list'][] = $tr['id_baris'];
         $grouped_orders[$key]['total_panjang_m'] += (float)$tr['panjang_m'];
@@ -78,24 +88,37 @@ while($tr = mysqli_fetch_assoc($q_orders)) {
         $grouped_orders[$key]['sum_ongkir'] += (int)$tr['ongkir'];
         $grouped_orders[$key]['sum_total_harga'] += (int)$tr['total_harga'];
         $grouped_orders[$key]['sum_dp_dibayar'] += (int)$tr['dp_dibayar'];
+        $grouped_orders[$key]['sum_nominal_pelunasan'] += (int)$tr['nominal_pelunasan'];
     }
 }
 
-// Ambil data alamat dari transaksi terakhir yg aktif
 $q_last = mysqli_query($conn, "SELECT id, alamat, lokasi_sawah FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND status NOT IN ('Selesai', 'Batal') ORDER BY id DESC LIMIT 1");
 $d_last = mysqli_fetch_assoc($q_last);
 $alamat_pelanggan = $d_last['alamat'] ?? $d_last['lokasi_sawah'] ?? '-';
-$id_terakhir = $d_last['id'] ?? 1;
+
+// LOGIKA NOMOR INVOICE PER TRANSAKSI (Bukan per baris/item)
+if ($is_history && $tgl_lunas_history) {
+    $q_first = mysqli_query($conn, "SELECT MIN(id) as first_id FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND status='Selesai' AND tgl_lunas='$tgl_lunas_history'");
+} else {
+    $q_first = mysqli_query($conn, "SELECT MIN(id) as first_id FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND status NOT IN ('Selesai', 'Batal')");
+}
+$first_id = mysqli_fetch_assoc($q_first)['first_id'] ?? 1;
+
+$q_count = mysqli_query($conn, "SELECT COUNT(DISTINCT CONCAT(tgl_booking, nama_customer, no_hp)) as urutan_transaksi FROM order_bibit WHERE status != 'Batal' AND (tipe_order = 'Reguler' OR tipe_order IS NULL) AND id <= '$first_id'");
+$d_count = mysqli_fetch_assoc($q_count);
+$id_terakhir = $d_count['urutan_transaksi'] ?? 1;
 
 // LOGIKA PEMBUATAN NOMOR INVOICE & NAMA FILE
-$tgl_cetak = date('d F Y');
+$bulan_indo = array(1 => 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember');
+$tgl_cetak = date('d') . ' ' . $bulan_indo[(int)date('m')] . ' ' . date('Y');
 $bulan_romawi = array("", "I","II","III", "IV", "V","VI","VII","VIII","IX","X", "XI","XII")[date('n')];
 $nomor_urut = str_pad($id_terakhir, 4, '0', STR_PAD_LEFT);
 $no_invoice = "INV-BIBIT/PCT/" . $nomor_urut . "/" . $bulan_romawi . "/" . date('Y');
 
 $safe_no_invoice = str_replace('/', '-', $no_invoice);
 $nama_file = ucwords(trim($nama_pelanggan));
-$judul_dokumen = $safe_no_invoice . " - " . $nama_file;
+$alamat_file = trim($alamat_pelanggan);
+$judul_dokumen = $safe_no_invoice . " - " . $nama_file . " - " . $alamat_file;
 ?>
 
 <!DOCTYPE html>
@@ -208,7 +231,11 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
                 </div>
             </div>
             <div class="invoice-title">
-                <h2 class="color-accent">INVOICE</h2>
+                <h2 class="color-accent"><?php 
+                    if($jenis_cetak == 'dp') echo "INVOICE DP";
+                    elseif($jenis_cetak == 'lunas') echo "INVOICE LUNAS";
+                    else echo "INVOICE";
+                ?></h2>
                 <p class="color-primary"><?= $no_invoice ?></p>
             </div>
         </div>
@@ -222,7 +249,7 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
                 <div class="info-value"><?= htmlspecialchars($no_hp ?: '-') ?></div>
             </div>
             <div class="info-group">
-                <div class="info-label">TANGGAL INVOICE:</div>
+                <div class="info-label">INVOICE DICETAK:</div>
                 <div class="info-value"><?= $tgl_cetak ?></div>
                 <div class="info-label">ALAMAT / LOKASI:</div>
                 <div class="info-value"><?= htmlspecialchars($alamat_pelanggan) ?></div>
@@ -234,10 +261,9 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
             <thead>
                 <tr>
                     <th width="5%">NO</th>
-                    <th width="35%" class="text-left">DESKRIPSI TRANSAKSI</th>
+                    <th width="49%" class="text-left">DESKRIPSI TRANSAKSI</th>
                     <th width="10%" class="text-center">QTY</th>
                     <th width="18%" class="text-right">HARGA SATUAN</th>
-                    <th width="14%" class="text-right">DISKON</th>
                     <th width="18%" class="text-right">JUMLAH (Rp)</th>
                 </tr>
             </thead>
@@ -245,7 +271,7 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
                 <?php 
                 $no = 1; 
                 $grand_harga_dasar = 0; $grand_diskon = 0; $grand_ongkir = 0; 
-                $grand_total = 0; $grand_dibayar = 0;
+                $grand_total = 0; $grand_dibayar = 0; $grand_pelunasan = 0;
 
                 foreach($grouped_orders as $tr): 
                     $panjang = (float)$tr['total_panjang_m'];
@@ -270,15 +296,17 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
 
                     $total = $tr['sum_total_harga'];
                     $dibayar = $tr['sum_dp_dibayar'];
+                    $pelunasan = $tr['sum_nominal_pelunasan'];
                     
                     // Murni harga yang tertagih per baris tanpa ongkir
-                    $subtotal_baris = $harga_dasar - $potongan;
+                    $subtotal_baris = $harga_dasar;
 
                     $grand_harga_dasar += $harga_dasar;
                     $grand_diskon += $potongan;
                     $grand_ongkir += $ongkir;
                     $grand_total += $total;
                     $grand_dibayar += $dibayar;
+                    $grand_pelunasan += $pelunasan;
                 ?>
                 <tr>
                     <td class="text-center" style="vertical-align: top; color: #222;"><?= $no++ ?></td>
@@ -289,7 +317,6 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
                     </td>
                     <td class="text-center font-bold" style="vertical-align: top; color: #222;"><?= $qty_str ?></td>
                     <td class="text-right font-bold" style="vertical-align: top; color: #222;"><?= $txt_harga_satuan ?></td>
-                    <td class="text-right" style="vertical-align: top; color: #222;"><?= $potongan > 0 ? formatRp($potongan) : '-' ?></td>
                     <td class="text-right font-bold" style="vertical-align: top; color: #222;"><?= formatRp($subtotal_baris) ?></td>
                 </tr>
                 <?php endforeach; 
@@ -300,6 +327,7 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
                 $grand_ongkir = round($grand_ongkir, -1);
                 $grand_total = round($grand_total, -1);
                 $grand_dibayar = round($grand_dibayar, -1);
+                $grand_pelunasan = round($grand_pelunasan, -1);
                 $grand_sisa = $grand_total - $grand_dibayar;
                 ?>
             </tbody>
@@ -309,26 +337,45 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
         <div class="calc-container">
             <table class="calc-table">
                 <tr>
-                    <td class="text-right">Total Harga Dasar</td>
+                    <td class="text-right">Subtotal</td>
                     <td class="text-right">Rp <?= formatRp($grand_harga_dasar) ?></td>
                 </tr>
                 
                 <?php if($grand_diskon > 0): ?>
                 <tr>
-                    <td class="text-right">Total Diskon</td>
+                    <td class="text-right">Subtotal Diskon</td>
                     <td class="text-right font-bold">- Rp <?= formatRp($grand_diskon) ?></td>
                 </tr>
                 <?php endif; ?>
                 
                 <?php if($grand_ongkir > 0): ?>
                 <tr>
-                    <td class="text-right">Total Biaya Kirim</td>
+                    <td class="text-right">Subtotal Pengiriman</td>
                     <td class="text-right font-bold">+ Rp <?= formatRp($grand_ongkir) ?></td>
                 </tr>
                 <?php endif; ?>
 
-                <!-- BLOK LOGIKA: JIKA MASIH NGUTANG -->
-                <?php if($grand_sisa > 0): ?>
+                <!-- BLOK LOGIKA: JIKA JENIS LUNAS (Hanya menampilkan pelunasan sekarang) -->
+                <?php if($jenis_cetak == 'lunas'): ?>
+                    <tr class="border-top">
+                        <td class="text-right font-bold" style="padding-top: 12px;">Total Akumulasi Tagihan</td>
+                        <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($grand_total) ?></td>
+                    </tr>
+                    <tr>
+                        <td class="text-right">Telah Dibayar (DP Sebelumnya)</td>
+                        <td class="text-right font-bold">- Rp <?= formatRp($grand_dibayar) ?></td>
+                    </tr>
+                    <tr class="grand-total">
+                        <td class="text-right uppercase">PELUNASAN SEKARANG</td>
+                        <td class="text-right font-bold">Rp <?= formatRp($grand_pelunasan) ?></td>
+                    </tr>
+            </table>
+            <div class="terbilang-right">
+                Terbilang (Pelunasan): <?= ucwords(terbilang($grand_pelunasan)) ?> Rupiah
+            </div>
+
+                <!-- BLOK LOGIKA: JIKA JENIS DP atau MASIH NGUTANG -->
+                <?php elseif($jenis_cetak == 'dp' || $grand_sisa > 0): ?>
                     <tr class="border-top">
                         <td class="text-right font-bold" style="padding-top: 12px;">Total Akumulasi Tagihan</td>
                         <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($grand_total) ?></td>
@@ -346,7 +393,7 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
                 Terbilang (Sisa Bayar): <?= ucwords(terbilang($grand_sisa)) ?> Rupiah
             </div>
 
-                <!-- BLOK LOGIKA: JIKA SUDAH LUNAS 100% -->
+                <!-- BLOK LOGIKA: JIKA SUDAH LUNAS 100% dari Awal (Tanpa parameter jenis) -->
                 <?php else: ?>
                     <tr class="border-top">
                         <td class="text-right font-bold" style="padding-top: 12px;">Total Akumulasi Tagihan</td>
@@ -354,7 +401,7 @@ $judul_dokumen = $safe_no_invoice . " - " . $nama_file;
                     </tr>
                     <tr class="grand-total">
                         <td class="text-right uppercase">TOTAL TELAH DIBAYAR (LUNAS)</td>
-                        <td class="text-right font-bold">Rp <?= formatRp($grand_dibayar) ?></td>
+                        <td class="text-right font-bold">Rp <?= formatRp($grand_dibayar + $grand_pelunasan) ?></td>
                     </tr>
             </table>
             <div class="terbilang-right">

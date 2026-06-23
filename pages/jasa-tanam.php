@@ -5,6 +5,16 @@ $tgl_hari_ini = date('Y-m-d');
 $tab = isset($_GET['tab']) ? $_GET['tab'] : 'dashboard'; 
 
 // =========================================================================
+// 0. AUTO DB MIGRATION
+// =========================================================================
+$cek_kolom_1 = mysqli_query($conn, "SHOW COLUMNS FROM `order_bibit` LIKE 'biaya_tambahan'");
+if(mysqli_num_rows($cek_kolom_1) == 0) mysqli_query($conn, "ALTER TABLE `order_bibit` ADD `biaya_tambahan` INT DEFAULT 0");
+$cek_kolom_2 = mysqli_query($conn, "SHOW COLUMNS FROM `order_bibit` LIKE 'ket_biaya_tambahan'");
+if(mysqli_num_rows($cek_kolom_2) == 0) mysqli_query($conn, "ALTER TABLE `order_bibit` ADD `ket_biaya_tambahan` VARCHAR(255) DEFAULT ''");
+$cek_kolom_3 = mysqli_query($conn, "SHOW COLUMNS FROM `order_bibit` LIKE 'progres_tanam'");
+if(mysqli_num_rows($cek_kolom_3) == 0) mysqli_query($conn, "ALTER TABLE `order_bibit` ADD `progres_tanam` VARCHAR(255) DEFAULT ''");
+
+// =========================================================================
 // 1. ENGINE UPDATE STATUS (METODE AUTO-REFRESH SUPER STABIL)
 // =========================================================================
 if (isset($_GET['action']) && $_GET['action'] == 'update_status' && isset($_GET['no_order']) && isset($_GET['status_baru'])) {
@@ -46,6 +56,23 @@ if (isset($_GET['action']) && $_GET['action'] == 'update_status' && isset($_GET[
 }
 
 // =========================================================================
+// 1.5. ENGINE UPDATE PROGRES PENANAMAN
+// =========================================================================
+if (isset($_POST['update_progres'])) {
+    $no_order = mysqli_real_escape_string($conn, $_POST['no_order']);
+    $progres = mysqli_real_escape_string($conn, $_POST['progres_tanam']);
+    
+    $cek_kolom = mysqli_query($conn, "SHOW COLUMNS FROM `order_bibit` LIKE 'progres_tanam'");
+    if(mysqli_num_rows($cek_kolom) == 0) {
+        mysqli_query($conn, "ALTER TABLE `order_bibit` ADD `progres_tanam` VARCHAR(255) DEFAULT ''");
+    }
+    
+    mysqli_query($conn, "UPDATE order_bibit SET progres_tanam='$progres' WHERE no_order='$no_order'");
+    echo "<script>alert('Progres penanaman berhasil diperbarui!'); window.location.href='?page=jasa-tanam&tab=aktif';</script>";
+    exit;
+}
+
+// =========================================================================
 // 2. CONFIG ACUAN HARGA DASAR GLOBAL DARI DATABASE
 // =========================================================================
 $cfg_bibit = 800000; $cfg_jasa = 1200000;
@@ -83,8 +110,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['simpan_jasa_tanam'])) 
     if ($jml_baris == 0 && $meter_tambahan <= 0) { echo "<script>alert('Gagal! Pilih minimal 1 baris lahan atau meter tambahan.'); window.history.back();</script>"; exit; }
 
     $tahun = date('Y', strtotime($tgl_b));
-    $q_count = mysqli_query($conn, "SELECT COUNT(DISTINCT no_order) as total FROM order_bibit WHERE no_order LIKE 'JT-%'");
-    $next_id = mysqli_fetch_assoc($q_count)['total'] + 1;
+    $q_max = mysqli_query($conn, "SELECT MAX(CAST(SUBSTRING_INDEX(no_order, '-', -1) AS UNSIGNED)) as max_id FROM order_bibit WHERE no_order LIKE 'JT-%'");
+    $next_id = mysqli_fetch_assoc($q_max)['max_id'] + 1;
     $no_order = "JT-" . $tahun . "-" . str_pad($next_id, 4, '0', STR_PAD_LEFT);
 
     $subtotal_gabungan = ($cfg_bibit + $cfg_jasa) * $jml_baris;
@@ -152,8 +179,198 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['update_jasa_tanam'])) 
     $tgl_t = mysqli_real_escape_string($conn, $_POST['edit_tgl_tanam']);
     $ket = mysqli_real_escape_string($conn, $_POST['edit_keterangan']);
 
+    // Fitur Tambahan Biaya
+    $biaya_tambahan = isset($_POST['edit_biaya_tambahan']) ? (int)str_replace('.', '', $_POST['edit_biaya_tambahan']) : 0;
+    $ket_biaya_tambahan = mysqli_real_escape_string($conn, $_POST['edit_ket_biaya_tambahan'] ?? '');
+
+    // Hitung ulang harga jika ada biaya tambahan yang diinput
+    $q_rows = mysqli_query($conn, "SELECT id, harga_dasar, biaya_jasa, diskon_persen, diskon_nominal, ongkir FROM order_bibit WHERE no_order='$no_order'");
+    $total_base = 0; $rows = [];
+    while($r = mysqli_fetch_assoc($q_rows)) {
+        $total_base += ($r['harga_dasar'] + $r['biaya_jasa']);
+        $rows[] = $r;
+    }
+    
+    foreach($rows as $r) {
+        $sub = $r['harga_dasar'] + $r['biaya_jasa'];
+        $rasio = ($total_base > 0) ? ($sub / $total_base) : 1;
+        $bt_item = round($biaya_tambahan * $rasio);
+        
+        $new_total = $sub - ($sub * ($r['diskon_persen']/100)) - $r['diskon_nominal'] + $r['ongkir'] + $bt_item;
+        mysqli_query($conn, "UPDATE order_bibit SET biaya_tambahan=$bt_item, ket_biaya_tambahan='$ket_biaya_tambahan', total_harga=$new_total WHERE id={$r['id']}");
+    }
+
     mysqli_query($conn, "UPDATE order_bibit SET nama_customer='$nama', no_hp='$hp', alamat='$alamat', lokasi_sawah='$sawah', tgl_tanam='$tgl_t', keterangan='$ket' WHERE no_order='$no_order'");
     echo "<script>alert('Kontrak Jasa Tanam berhasil diperbarui!'); window.location.href='?page=jasa-tanam&tab=data';</script>"; exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'tukar_baris') {
+    $no_order = mysqli_real_escape_string($conn, $_POST['no_order']);
+    $old_id = mysqli_real_escape_string($conn, $_POST['old_id_baris']);
+    $new_id = mysqli_real_escape_string($conn, $_POST['new_id_baris']);
+
+    $q_old = mysqli_query($conn, "SELECT id, panjang_m, varietas FROM order_bibit WHERE no_order='$no_order' AND id_baris='$old_id' LIMIT 1");
+    if($old = mysqli_fetch_assoc($q_old)) {
+        $panjang_m = (float)$old['panjang_m'];
+        $order_id = $old['id'];
+
+        $q_new_var = mysqli_query($conn, "SELECT v.nama_varietas FROM bibit_baris b LEFT JOIN varietas_bibit v ON b.id_varietas = v.id WHERE b.id_baris='$new_id'");
+        $new_var_nama = mysqli_fetch_assoc($q_new_var)['nama_varietas'] ?: 'Ciherang';
+
+        mysqli_query($conn, "UPDATE bibit_baris SET tersedia_m = LEAST(tersedia_m + $panjang_m, 12.0), status='tumbuh' WHERE id_baris='$old_id'");
+        mysqli_query($conn, "UPDATE bibit_baris SET tersedia_m = GREATEST(tersedia_m - $panjang_m, 0.0) WHERE id_baris='$new_id'");
+        mysqli_query($conn, "UPDATE bibit_baris SET status='habis' WHERE id_baris='$new_id' AND tersedia_m <= 0");
+        mysqli_query($conn, "UPDATE order_bibit SET id_baris='$new_id', varietas='$new_var_nama' WHERE id='$order_id'");
+
+        echo "<script>alert('Berhasil! Baris #$old_id telah ditukar dengan baris #$new_id.'); window.location.href='?page=jasa-tanam&tab=data&highlight=$no_order';</script>"; exit;
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'ubah_volume') {
+    $no_order = mysqli_real_escape_string($conn, $_POST['no_order']);
+    $id_baris = mysqli_real_escape_string($conn, $_POST['id_baris']);
+    $new_m = (float)$_POST['volume_baru'];
+
+    if ($new_m <= 0 || $new_m > 12) {
+        echo "<script>alert('Gagal! Volume baru harus di antara 0.1 hingga 12 meter.'); window.history.back();</script>"; exit;
+    }
+
+    $q_old = mysqli_query($conn, "SELECT id, panjang_m, harga_dasar, biaya_jasa FROM order_bibit WHERE no_order='$no_order' AND id_baris='$id_baris' LIMIT 1");
+    if($old = mysqli_fetch_assoc($q_old)) {
+        $old_m = (float)$old['panjang_m'];
+        $diff = $new_m - $old_m;
+
+        $q_inv = mysqli_query($conn, "SELECT tersedia_m FROM bibit_baris WHERE id_baris='$id_baris'");
+        $inv = mysqli_fetch_assoc($q_inv);
+        $tersedia_sekarang = (float)$inv['tersedia_m'];
+
+        if ($diff > 0 && $tersedia_sekarang < $diff) {
+            echo "<script>alert('Gagal! Lahan tidak cukup. Hanya tersisa $tersedia_sekarang m di baris ini.'); window.history.back();</script>"; exit;
+        }
+
+        $new_tersedia = $tersedia_sekarang - $diff;
+        $status_baru = ($new_tersedia <= 0) ? 'habis' : 'tumbuh';
+        mysqli_query($conn, "UPDATE bibit_baris SET tersedia_m=$new_tersedia, status='$status_baru' WHERE id_baris='$id_baris'");
+
+        $new_h_dasar = round(($new_m / 12) * $cfg_bibit);
+        $new_h_jasa = round(($new_m / 12) * $cfg_jasa);
+        mysqli_query($conn, "UPDATE order_bibit SET panjang_m=$new_m, harga_dasar=$new_h_dasar, biaya_jasa=$new_h_jasa WHERE id={$old['id']}");
+
+        // Recalculate whole order
+        $q_rows = mysqli_query($conn, "SELECT id, harga_dasar, biaya_jasa, diskon_persen, diskon_nominal, ongkir, biaya_tambahan, dp_dibayar FROM order_bibit WHERE no_order='$no_order'");
+        $total_h_dasar = 0; $total_h_jasa = 0; $rows = [];
+        $first_diskon_p = 0; $first_diskon_n = 0; $first_ongkir = 0; $first_bt = 0; $first_dp = 0;
+        
+        while($r = mysqli_fetch_assoc($q_rows)) {
+            if(empty($rows)) {
+                $first_diskon_p = (float)$r['diskon_persen'];
+                $first_diskon_n = (int)$r['diskon_nominal'];
+                $first_ongkir = (int)$r['ongkir'];
+                $first_bt = (int)$r['biaya_tambahan'];
+                $first_dp = (int)$r['dp_dibayar'];
+            }
+            $total_h_dasar += (int)$r['harga_dasar'];
+            $total_h_jasa += (int)$r['biaya_jasa'];
+            $rows[] = $r;
+        }
+
+        $total_sub = $total_h_dasar + $total_h_jasa;
+        foreach($rows as $r) {
+            $prop = ($r['harga_dasar'] + $r['biaya_jasa']) / $total_sub;
+            $new_dn = round($first_diskon_n * $prop);
+            $new_ok = round($first_ongkir * $prop);
+            $new_bt = round($first_bt * $prop);
+            $new_dp = round($first_dp * $prop);
+            
+            $th = ($r['harga_dasar'] + $r['biaya_jasa']) - (($r['harga_dasar'] * ($first_diskon_p/100)) + $new_dn) + $new_ok + $new_bt;
+            mysqli_query($conn, "UPDATE order_bibit SET diskon_persen=$first_diskon_p, diskon_nominal=$new_dn, ongkir=$new_ok, biaya_tambahan=$new_bt, dp_dibayar=$new_dp, total_harga=$th WHERE id={$r['id']}");
+        }
+
+        echo "<script>alert('Berhasil! Volume baris #$id_baris telah diubah menjadi $new_m meter.'); window.location.href='?page=jasa-tanam&tab=data&highlight=$no_order';</script>"; exit;
+    }
+}
+
+
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'update_progres_modal') {
+    $no_order = mysqli_real_escape_string($conn, $_POST['up_no_order']);
+    $new_progres = mysqli_real_escape_string($conn, $_POST['up_progres']);
+    
+    // Update progres_tanam for all rows in the order
+    mysqli_query($conn, "UPDATE order_bibit SET progres_tanam='$new_progres' WHERE no_order='$no_order'");
+    
+    echo "<script>alert('Berhasil! Progres penanaman telah diperbarui.'); window.location.href='?page=jasa-tanam&tab=aktif&highlight=$no_order';</script>"; exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'tambah_baris') {
+    $no_order = mysqli_real_escape_string($conn, $_POST['no_order']);
+    $new_id = mysqli_real_escape_string($conn, $_POST['new_id_baris']);
+    $new_m = (float)$_POST['meter_tambahan'];
+
+    if ($new_m <= 0 || $new_m > 12) {
+        echo "<script>alert('Gagal! Meter tambahan harus di antara 0.1 hingga 12 meter.'); window.history.back();</script>"; exit;
+    }
+
+    $q_inv = mysqli_query($conn, "SELECT b.tersedia_m, v.nama_varietas FROM bibit_baris b LEFT JOIN varietas_bibit v ON b.id_varietas = v.id WHERE b.id_baris='$new_id'");
+    $inv = mysqli_fetch_assoc($q_inv);
+    $tersedia_sekarang = (float)$inv['tersedia_m'];
+    $var_nama = $inv['nama_varietas'] ?: 'Ciherang';
+
+    if ($tersedia_sekarang < $new_m) {
+        echo "<script>alert('Gagal! Lahan tidak cukup. Hanya tersisa $tersedia_sekarang m di baris #$new_id.'); window.history.back();</script>"; exit;
+    }
+
+    $q_parent = mysqli_query($conn, "SELECT nama_customer, no_hp, alamat, lokasi_sawah, tgl_tanam, tgl_booking, keterangan, status, diskon_persen, tipe_order, dp_dibayar FROM order_bibit WHERE no_order='$no_order' LIMIT 1");
+    if ($parent = mysqli_fetch_assoc($q_parent)) {
+        // Update inventory
+        $new_tersedia = $tersedia_sekarang - $new_m;
+        $status_baru = ($new_tersedia <= 0) ? 'habis' : 'tumbuh';
+        mysqli_query($conn, "UPDATE bibit_baris SET tersedia_m=$new_tersedia, status='$status_baru' WHERE id_baris='$new_id'");
+
+        // Check if this row already exists in the order
+        $q_existing = mysqli_query($conn, "SELECT id, panjang_m FROM order_bibit WHERE no_order='$no_order' AND id_baris='$new_id'");
+        if (mysqli_num_rows($q_existing) > 0) {
+            $existing = mysqli_fetch_assoc($q_existing);
+            $total_m = (float)$existing['panjang_m'] + $new_m;
+            $new_h_dasar = round(($total_m / 12) * $cfg_bibit);
+            $new_h_jasa = round(($total_m / 12) * $cfg_jasa);
+            $start_m = 12.0 - $tersedia_sekarang; $end_m = $start_m + $new_m;
+            $pos_tambahan = " + {$start_m}m - {$end_m}m";
+            mysqli_query($conn, "UPDATE order_bibit SET panjang_m=$total_m, posisi=CONCAT(posisi, '$pos_tambahan'), harga_dasar=$new_h_dasar, biaya_jasa=$new_h_jasa WHERE id={$existing['id']}");
+        } else {
+            // Insert new row
+            $new_h_dasar = round(($new_m / 12) * $cfg_bibit);
+            $new_h_jasa = round(($new_m / 12) * $cfg_jasa);
+            $start_m = 12.0 - $tersedia_sekarang; $end_m = $start_m + $new_m;
+            $pos = "{$start_m}m - {$end_m}m";
+            
+            mysqli_query($conn, "INSERT INTO order_bibit (no_order, nama_customer, no_hp, alamat, lokasi_sawah, tgl_tanam, tgl_booking, keterangan, status, diskon_persen, tipe_order, id_baris, varietas, panjang_m, posisi, harga_dasar, biaya_jasa, diskon_nominal, ongkir, biaya_tambahan, dp_dibayar, total_harga) 
+            VALUES ('$no_order', '{$parent['nama_customer']}', '{$parent['no_hp']}', '{$parent['alamat']}', '{$parent['lokasi_sawah']}', '{$parent['tgl_tanam']}', '{$parent['tgl_booking']}', '{$parent['keterangan']}', '{$parent['status']}', '{$parent['diskon_persen']}', '{$parent['tipe_order']}', '$new_id', '$var_nama', $new_m, '$pos', $new_h_dasar, $new_h_jasa, 0, 0, 0, 0, 0)");
+        }
+
+        // Recalculate whole order to redistribute diskon_persen, ongkir, biaya_tambahan, and DP
+        $q_rows = mysqli_query($conn, "SELECT id, harga_dasar, biaya_jasa, diskon_persen, diskon_nominal, ongkir, biaya_tambahan, dp_dibayar FROM order_bibit WHERE no_order='$no_order'");
+        $total_base = 0; $rows = [];
+        $total_bt = 0; $total_dp = 0;
+        while($r = mysqli_fetch_assoc($q_rows)) {
+            $total_base += ($r['harga_dasar'] + $r['biaya_jasa']);
+            $total_bt += $r['biaya_tambahan'];
+            $total_dp += $r['dp_dibayar'];
+            $rows[] = $r;
+        }
+        
+        foreach($rows as $r) {
+            $sub = $r['harga_dasar'] + $r['biaya_jasa'];
+            $rasio = ($total_base > 0) ? ($sub / $total_base) : 1;
+            $bt_item = round($total_bt * $rasio);
+            $dp_item = round($total_dp * $rasio); 
+            
+            $new_total = $sub - ($sub * ($r['diskon_persen']/100)) - $r['diskon_nominal'] + $r['ongkir'] + $bt_item;
+            mysqli_query($conn, "UPDATE order_bibit SET total_harga=$new_total, biaya_tambahan=$bt_item, dp_dibayar=$dp_item WHERE id={$r['id']}");
+        }
+
+        echo "<script>alert('Berhasil! Baris #$new_id ($new_m meter) telah ditambahkan ke kontrak.'); window.location.href='?page=jasa-tanam&tab=data&highlight=$no_order';</script>"; exit;
+    }
 }
 
 if (isset($_GET['action']) && $_GET['action'] == 'hapus_permanen' && isset($_GET['no_order'])) {
@@ -221,6 +438,7 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
     <div class="flex gap-6 border-b border-gray-200 dark:border-[#30363d] mb-6 px-2 overflow-x-auto">
         <a href="?page=jasa-tanam&tab=dashboard" class="border-b-2 <?= $tab=='dashboard' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-solid fa-chart-simple mr-1.5"></i> Dashboard</a>
         <a href="?page=jasa-tanam&tab=baru" class="border-b-2 <?= $tab=='baru' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-solid fa-plus mr-1.5"></i> Order Baru</a>
+        <a href="?page=jasa-tanam&tab=aktif" class="border-b-2 <?= $tab=='aktif' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-solid fa-users mr-1.5"></i> Transaksi Aktif</a>
         <a href="?page=jasa-tanam&tab=data" class="border-b-2 <?= $tab=='data' ? 'border-[#3fb950] text-[#3fb950]' : 'border-transparent text-gray-500 dark:text-[#8b949e] hover:text-gray-700 dark:hover:text-gray-200' ?> pb-3 text-[13px] font-bold whitespace-nowrap transition-colors"><i class="fa-regular fa-folder-open mr-1.5"></i> Data Order</a>
     </div>
 
@@ -486,6 +704,7 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
             SUM(harga_dasar) as total_bibit, SUM(biaya_jasa) as total_jasa, SUM(total_harga) as total_f,
             SUM(dp_dibayar) as total_dp, SUM(ongkir) as total_ongkir, SUM(panjang_m) as total_meter,
             SUM((harga_dasar + biaya_jasa) * (diskon_persen/100) + diskon_nominal) as total_diskon,
+            SUM(biaya_tambahan) as total_biaya_tambahan, MAX(ket_biaya_tambahan) as max_ket_biaya_tambahan,
             GROUP_CONCAT(id_baris SEPARATOR ', ') as baris_gabung, MIN(tgl_booking) as tgl_booking_min
             FROM order_bibit WHERE tipe_order='Jasa Tanam' GROUP BY no_order ORDER BY id DESC");
             
@@ -565,7 +784,10 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
                                 'tgl_p' => date('d M Y', strtotime($jt['tgl_tanam'])),
                                 'tgl_t' => date('d M Y', strtotime($jt['tgl_tanam'])),
                                 'total' => 'Rp ' . number_format($jt['total_f'], 0, ',', '.'),
-                                'keterangan' => $jt['keterangan'] ?: '-'
+                                'keterangan' => $jt['keterangan'] ?: '-',
+                                'biaya_tambahan' => (int)$jt['max_biaya_tambahan'],
+                                'ket_biaya_tambahan' => $jt['max_ket_biaya_tambahan'],
+                                'baris_asli' => explode(', ', $jt['baris_gabung'])
                             ];
                         ?>
                         <tr class="hover:bg-gray-50 dark:hover:bg-[#21262d] transition-colors baris-order-jasa <?= $kelas_blink ?>" data-name="<?= strtolower(htmlspecialchars($jt['nama_customer'])) ?>" data-phone="<?= htmlspecialchars($jt['no_hp']) ?>" data-status="<?= $jt['status'] ?>">
@@ -602,6 +824,7 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
                             <td class="py-3.5 px-3 text-center">
                                 <div class="flex items-center justify-center gap-2">
                                     <button onclick="bukaModalDetailJasa('<?= $jt['no_order'] ?>')" class="w-6 h-6 rounded flex items-center justify-center text-[#58a6ff] hover:bg-[#58a6ff]/10 transition-colors" title="Lihat Detail"><i class="fa-regular fa-eye"></i></button>
+                                    <a href="cetak/invoice-jasa-tanam.php?no_order=<?= $jt['no_order'] ?>" target="_blank" class="w-6 h-6 rounded flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#30363d] transition-colors" title="Cetak Invoice"><i class="fa-solid fa-print"></i></a>
                                     <?php
                                         $st_aktif = $jt['status'];
                                         $warna_teks_dd = 'text-gray-900 dark:text-white';
@@ -647,17 +870,25 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
             </table>
         </div>
     </div>
+    <?php endif; ?>
 
+    <?php if($tab == 'data' || $tab == 'aktif'): ?>
     <div id="modal-detail-jasa" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 hidden backdrop-blur-sm">
         <div class="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden flex flex-col text-white">
             <div class="px-5 py-4 border-b border-[#30363d] flex justify-between items-center bg-[#0d1117]">
-                <h3 class="text-[14px] font-bold flex items-center"><i class="fa-regular fa-eye mr-2 text-[#58a6ff]"></i> Detail Order - <span id="m_no_order" class="text-[#58a6ff] ml-1"></span></h3>
-                <div class="flex items-center gap-2">
-                    <button onclick="bukaEditJasaTanamModal()" class="bg-[#21262d] border border-[#30363d] text-[#58a6ff] px-3 py-1 rounded text-[11px] font-bold flex items-center gap-1 hover:bg-[#30363d]"><i class="fa-regular fa-pen-to-square"></i> Edit</button>
-                    <button onclick="tutupModalDetailJasa()" class="text-gray-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
-                </div>
+                <h3 class="text-[15px] font-bold flex items-center"><i class="fa-regular fa-eye mr-2 text-[#58a6ff]"></i> Detail Order - <span id="m_no_order" class="text-[#58a6ff] ml-1"></span></h3>
+                <button onclick="tutupModalDetailJasa()" class="text-gray-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
             </div>
             <div class="p-5 space-y-4 max-h-[75vh] overflow-y-auto custom-scrollbar">
+                
+                <!-- Action Bar -->
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <button onclick="bukaTambahBarisModal()" class="bg-[#21262d] border border-[#30363d] text-[#1f6feb] px-3 py-2.5 rounded-lg text-[12px] font-bold flex justify-center items-center gap-2 hover:bg-[#30363d] transition-colors"><i class="fa-solid fa-plus"></i> Tambah Lahan</button>
+                    <button onclick="bukaUbahVolumeModal()" class="bg-[#21262d] border border-[#30363d] text-[#3fb950] px-3 py-2.5 rounded-lg text-[12px] font-bold flex justify-center items-center gap-2 hover:bg-[#30363d] transition-colors"><i class="fa-solid fa-arrows-up-down"></i> Ubah Volume</button>
+                    <button onclick="bukaGantiBarisModal()" class="bg-[#21262d] border border-[#30363d] text-[#d29922] px-3 py-2.5 rounded-lg text-[12px] font-bold flex justify-center items-center gap-2 hover:bg-[#30363d] transition-colors"><i class="fa-solid fa-rotate"></i> Tukar Baris</button>
+                    <button onclick="bukaEditJasaTanamModal()" class="bg-[#21262d] border border-[#30363d] text-[#58a6ff] px-3 py-2.5 rounded-lg text-[12px] font-bold flex justify-center items-center gap-2 hover:bg-[#30363d] transition-colors"><i class="fa-regular fa-pen-to-square"></i> Edit Order</button>
+                </div>
+
                 <div class="bg-[#0d1117] border border-[#30363d] p-4 rounded-lg space-y-3">
                     <h4 class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Informasi Customer</h4>
                     <div class="grid grid-cols-2 gap-3 text-[13px]">
@@ -698,16 +929,282 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
                     <div><label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Lokasi Sawah *</label><input type="text" name="edit_sawah" id="form_eo_sawah" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none"></div>
                     <div><label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Tanggal Rencana Tanam *</label><input type="date" name="edit_tgl_tanam" id="form_eo_tgl_t" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none [color-scheme:light] dark:[color-scheme:dark]"></div>
                     <div><label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Catatan Keterangan</label><textarea name="edit_keterangan" id="form_eo_ket" rows="2" class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none resize-none"></textarea></div>
+                    <div class="grid grid-cols-2 gap-3 pt-2 border-t border-gray-200 dark:border-[#30363d]">
+                        <div><label class="block text-[11px] font-bold uppercase text-gray-500 mb-1 text-[#d29922]">Biaya Tambahan</label><input type="text" name="edit_biaya_tambahan" id="form_eo_biaya_tambahan" placeholder="Cth: 50000" class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none"></div>
+                        <div><label class="block text-[11px] font-bold uppercase text-gray-500 mb-1 text-[#d29922]">Keterangan Biaya</label><input type="text" name="edit_ket_biaya_tambahan" id="form_eo_ket_biaya_tambahan" placeholder="Cth: Pupuk Ekstra" class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none"></div>
+                    </div>
                 </div>
                 <div class="px-5 py-4 border-t border-gray-200 dark:border-[#30363d] bg-gray-50 dark:bg-[#0d1117] flex gap-3"><button type="button" onclick="tutupEditJasaTanamModal()" class="w-1/3 bg-gray-200 dark:bg-[#21262d] text-gray-700 dark:text-white py-2 rounded text-[13px] font-bold">Batal</button><button type="submit" name="update_jasa_tanam" class="w-2/3 bg-[#1f6feb] text-white py-2 rounded text-[13px] font-bold shadow">Simpan Perubahan</button></div>
             </form>
         </div>
     </div>
+
+    <div id="modal-ganti-baris" class="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 hidden backdrop-blur-sm">
+        <div class="bg-white dark:bg-[#161b22] rounded-xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden border border-gray-200 dark:border-[#30363d] flex flex-col text-gray-800 dark:text-gray-300">
+            <form method="POST" action="">
+                <input type="hidden" name="action" value="tukar_baris">
+                <input type="hidden" name="no_order" id="gb_no_order">
+                <div class="px-5 py-4 border-b border-gray-200 dark:border-[#30363d] flex justify-between items-center bg-gray-50 dark:bg-[#0d1117]">
+                    <h3 class="text-[15px] font-bold text-gray-900 dark:text-white"><i class="fa-solid fa-rotate mr-2 text-[#d29922]"></i> Ganti Baris Bibit</h3>
+                    <button type="button" onclick="tutupGantiBarisModal()" class="text-gray-500 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+                </div>
+                <div class="p-5 space-y-4">
+                    <div>
+                        <label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Baris Lama (Saat ini)</label>
+                        <select name="old_id_baris" id="gb_old_id" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none">
+                        </select>
+                    </div>
+                    <div class="flex justify-center text-gray-400"><i class="fa-solid fa-arrow-down"></i></div>
+                    <div>
+                        <label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Baris Baru (Tujuan)</label>
+                        <select name="new_id_baris" id="gb_new_id" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none">
+                        </select>
+                    </div>
+                    <p class="text-[10px] text-gray-500 italic mt-2">*Pergantian baris ini otomatis me-refund stok baris lama dan memotong stok baris baru. Pastikan memilih baris dengan kapasitas yang sesuai!</p>
+                </div>
+                <div class="px-5 py-4 border-t border-gray-200 dark:border-[#30363d] bg-gray-50 dark:bg-[#0d1117] flex gap-3">
+                    <button type="button" onclick="tutupGantiBarisModal()" class="w-1/3 bg-gray-200 dark:bg-[#21262d] text-gray-700 dark:text-white py-2 rounded text-[13px] font-bold">Batal</button>
+                    <button type="submit" class="w-2/3 bg-[#d29922] text-white py-2 rounded text-[13px] font-bold shadow">Simpan Tukar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="modal-ubah-volume" class="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 hidden backdrop-blur-sm">
+        <div class="bg-white dark:bg-[#161b22] rounded-xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden border border-gray-200 dark:border-[#30363d] flex flex-col text-gray-800 dark:text-gray-300">
+            <form method="POST" action="">
+                <input type="hidden" name="action" value="ubah_volume">
+                <input type="hidden" name="no_order" id="uv_no_order">
+                <div class="px-5 py-4 border-b border-gray-200 dark:border-[#30363d] flex justify-between items-center bg-gray-50 dark:bg-[#0d1117]">
+                    <h3 class="text-[15px] font-bold text-gray-900 dark:text-white"><i class="fa-solid fa-arrows-up-down mr-2 text-[#3fb950]"></i> Ubah Volume Lahan</h3>
+                    <button type="button" onclick="tutupUbahVolumeModal()" class="text-gray-500 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+                </div>
+                <div class="p-5 space-y-4">
+                    <div>
+                        <label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Pilih Baris Lahan</label>
+                        <select name="id_baris" id="uv_id_baris" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none">
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] font-bold uppercase text-gray-500 mb-1 text-[#3fb950]">Volume Baru (Meter)</label>
+                        <input type="number" step="0.1" min="0.1" max="12" name="volume_baru" id="uv_volume_baru" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none" placeholder="Cth: 6">
+                    </div>
+                    <p class="text-[10px] text-gray-500 italic mt-2">*Masukkan sisa meteran mutlak yang baru. Jika ingin mengembalikan/mengurangi, ketik meteran yang tersisa. Sistem otomatis menambah/memotong stok asli.</p>
+                </div>
+                <div class="px-5 py-4 border-t border-gray-200 dark:border-[#30363d] bg-gray-50 dark:bg-[#0d1117] flex gap-3">
+                    <button type="button" onclick="tutupUbahVolumeModal()" class="w-1/3 bg-gray-200 dark:bg-[#21262d] text-gray-700 dark:text-white py-2 rounded text-[13px] font-bold">Batal</button>
+                    <button type="submit" class="w-2/3 bg-[#3fb950] text-white py-2 rounded text-[13px] font-bold shadow">Ubah Volume</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="modal-tambah-baris" class="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 hidden backdrop-blur-sm">
+        <div class="bg-white dark:bg-[#161b22] rounded-xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden border border-gray-200 dark:border-[#30363d] flex flex-col text-gray-800 dark:text-gray-300">
+            <form method="POST" action="">
+                <input type="hidden" name="action" value="tambah_baris">
+                <input type="hidden" name="no_order" id="tb_no_order">
+                <div class="px-5 py-4 border-b border-gray-200 dark:border-[#30363d] flex justify-between items-center bg-gray-50 dark:bg-[#0d1117]">
+                    <h3 class="text-[15px] font-bold text-gray-900 dark:text-white"><i class="fa-solid fa-plus mr-2 text-[#1f6feb]"></i> Tambah Baris Lahan</h3>
+                    <button type="button" onclick="tutupTambahBarisModal()" class="text-gray-500 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+                </div>
+                <div class="p-5 space-y-4">
+                    <div>
+                        <label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Pilih Baris Kosong</label>
+                        <select name="new_id_baris" id="tb_id_baris" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none">
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] font-bold uppercase text-gray-500 mb-1 text-[#1f6feb]">Meter Tambahan</label>
+                        <input type="number" step="0.1" min="0.1" max="12" name="meter_tambahan" id="tb_meter_tambahan" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 text-[13px] focus:border-[#58a6ff] outline-none" placeholder="Cth: 5">
+                    </div>
+                    <p class="text-[10px] text-gray-500 italic mt-2">*Penambahan ini akan disisipkan ke dalam nota pesanan ini. Ongkir & biaya tambahan akan dihitung ulang secara proporsional otomatis.</p>
+                </div>
+                <div class="px-5 py-4 border-t border-gray-200 dark:border-[#30363d] bg-gray-50 dark:bg-[#0d1117] flex gap-3">
+                    <button type="button" onclick="tutupTambahBarisModal()" class="w-1/3 bg-gray-200 dark:bg-[#21262d] text-gray-700 dark:text-white py-2 rounded text-[13px] font-bold">Batal</button>
+                    <button type="submit" class="w-2/3 bg-[#1f6feb] text-white py-2 rounded text-[13px] font-bold shadow">Tambah Baris</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <div id="modal-update-progres" class="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 hidden backdrop-blur-sm">
+        <div class="bg-white dark:bg-[#161b22] rounded-xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden border border-gray-200 dark:border-[#30363d] flex flex-col text-gray-800 dark:text-gray-300">
+            <form method="POST" action="">
+                <input type="hidden" name="action" value="update_progres_modal">
+                <input type="hidden" name="up_no_order" id="up_no_order">
+                <div class="px-5 py-4 border-b border-gray-200 dark:border-[#30363d] flex justify-between items-center bg-gray-50 dark:bg-[#0d1117]"><h3 class="text-[15px] font-bold text-gray-900 dark:text-white"><i class="fa-solid fa-chart-line mr-2 text-[#8957e5]"></i> Update Progres Penanaman</h3><button type="button" onclick="tutupUpdateProgresModal()" class="text-gray-500 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button></div>
+                <div class="p-5 space-y-4">
+                    <div class="bg-[#0d1117] p-3 rounded-lg border border-[#30363d] mb-2">
+                        <p class="text-[11px] text-gray-400 text-center">Total Target Penanaman:</p>
+                        <p id="up_total_meter" class="text-center font-bold text-[#3fb950] text-[16px] mt-1"></p>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] font-bold uppercase text-gray-500 mb-1">Meter Selesai Ditanam *</label>
+                        <div class="relative flex items-center">
+                            <input type="number" step="any" min="0" name="up_progres" id="up_progres_input" required class="w-full bg-white dark:bg-[#0d1117] border border-gray-300 dark:border-[#30363d] text-gray-900 dark:text-white rounded px-3 py-2 pr-12 text-[13px] focus:border-[#58a6ff] outline-none">
+                            <span class="absolute right-3 text-[11px] font-bold text-gray-500 pointer-events-none">Meter</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="px-5 py-4 border-t border-gray-200 dark:border-[#30363d] bg-gray-50 dark:bg-[#0d1117] flex gap-3">
+                    <button type="button" onclick="tutupUpdateProgresModal()" class="w-1/3 bg-gray-200 dark:bg-[#21262d] text-gray-700 dark:text-white py-2 rounded text-[13px] font-bold">Batal</button>
+                    <button type="submit" class="w-2/3 bg-[#238636] hover:bg-[#2ea043] text-white py-2 rounded text-[13px] font-bold shadow transition-colors">Simpan Progres</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+
+    <?php endif; ?>
+
+    <?php if($tab == 'aktif'): ?>
+    <?php
+        $q_rekap = mysqli_query($conn, "
+            SELECT 
+                no_order, nama_customer, no_hp, lokasi_sawah, tgl_tanam, alamat, keterangan,
+                MIN(tgl_booking) as tgl_booking_min, SUM(panjang_m) as total_meter, GROUP_CONCAT(id_baris SEPARATOR ', ') as baris_gabung,
+                MAX(progres_tanam) as progres,
+                SUM(biaya_tambahan) as total_biaya_tambahan, MAX(ket_biaya_tambahan) as max_ket_biaya_tambahan,
+                SUM(total_harga) as total_belanja, 
+                SUM(dp_dibayar) as total_dibayar,
+                SUM(total_harga - dp_dibayar) as sisa_tagihan,
+                GROUP_CONCAT(CONCAT('&bull; <span class=\"text-[#58a6ff] font-bold\">#', id_baris, '</span> <b>', varietas, '</b> (', (panjang_m + 0), 'm) <span class=\"text-[9px] uppercase font-bold ml-1 ', IF(status='lunas' OR status='Tanam' OR status='Persiapan', 'text-[#f85149]', IF(status='Selesai', 'text-[#3fb950]', 'text-[#d29922]')), '\">[', status, ']</span>') SEPARATOR '<br>') as detail_barang
+            FROM order_bibit 
+            WHERE tipe_order = 'Jasa Tanam' AND status NOT IN ('Selesai', 'Batal')
+            GROUP BY no_order, nama_customer, no_hp 
+            ORDER BY id DESC
+        ");
+        
+        $js_order_data = [];
+    ?>
+    <div class="bg-[#161b22] border border-[#30363d] p-5 rounded-xl shadow-sm">
+        <div class="flex justify-between items-center mb-5">
+            <div>
+                <h2 class="text-base font-bold text-white flex items-center"><i class="fa-solid fa-users text-[#3fb950] mr-2"></i> Daftar Transaksi Aktif</h2>
+            </div>
+            <div class="relative w-64">
+                <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 text-[13px]"></i>
+                <input type="text" id="searchAktif" placeholder="Cari pelanggan..." class="w-full pl-8 pr-3 py-2 bg-[#0d1117] border border-[#30363d] text-white rounded text-[13px] focus:outline-none focus:border-[#58a6ff]">
+            </div>
+        </div>
+
+        <div class="overflow-x-auto border border-[#30363d] rounded-lg">
+            <table class="w-full text-left border-collapse min-w-max">
+                <thead class="bg-[#0d1117] border-b border-[#30363d]">
+                    <tr class="text-[10px] font-bold text-[#8b949e] uppercase tracking-wider">
+                        <th class="py-4 px-4 w-12 text-center">NO</th>
+                        <th class="py-4 px-4 min-w-[150px]">DATA PELANGGAN</th>
+                        <th class="py-4 px-4 min-w-[200px]">BARIS BIBIT YANG DIGUNAKAN</th>
+                        <th class="py-4 px-4 min-w-[150px]">PROGRES PENANAMAN</th>
+                        <th class="py-4 px-4 text-center">AKUMULASI BELANJA</th>
+                        <th class="py-4 px-4 text-center">TOTAL TERBAYAR</th>
+                        <th class="py-4 px-4 text-center">SISA BAYAR</th>
+                        <th class="py-4 px-4 text-center">AKSI</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-[#21262d]" id="bodyAktif">
+                    <?php if(mysqli_num_rows($q_rekap) > 0): $no=1; while($r = mysqli_fetch_assoc($q_rekap)): 
+                        $max_baris = round($r['total_meter']/12, 1);
+                        $js_order_data[$r['no_order']] = [
+                            'no_order' => $r['no_order'], 'nama' => $r['nama_customer'], 'hp' => $r['no_hp'],
+                            'alamat' => $r['alamat'] ?: '-', 'sawah' => $r['lokasi_sawah'], 'baris' => $max_baris . " (Baris: #".$r['baris_gabung'].")",
+                            'tgl_b' => date('d M Y', strtotime($r['tgl_booking_min'])),
+                            'tgl_p' => date('d M Y', strtotime($r['tgl_tanam'])),
+                            'tgl_t' => date('d M Y', strtotime($r['tgl_tanam'])),
+                            'total' => 'Rp ' . number_format($r['total_belanja'], 0, ',', '.'),
+                            'keterangan' => $r['keterangan'] ?: '-',
+                            'biaya_tambahan' => (int)$r['total_biaya_tambahan'],
+                            'ket_biaya_tambahan' => $r['max_ket_biaya_tambahan'],
+                            'baris_asli' => explode(', ', $r['baris_gabung'])
+                        ];
+                    ?>
+                    <tr class="hover:bg-[#21262d] transition-colors tr-aktif cursor-pointer" onclick="if(event.target.tagName !== 'INPUT' && event.target.tagName !== 'BUTTON' && event.target.tagName !== 'A' && event.target.tagName !== 'FORM') bukaModalDetailJasa('<?= $r['no_order'] ?>')" data-search="<?= strtolower($r['nama_customer'].' '.$r['no_hp'].' '.$r['no_order']) ?>">
+                        <td class="py-4 px-4 text-center text-[12px] font-bold text-[#8b949e]"><?= $no++ ?></td>
+                        <td class="py-4 px-4">
+                            <a href="?page=jasa-tanam&tab=data&highlight=<?= $r['no_order'] ?>" class="text-[13px] font-bold text-[#58a6ff] hover:underline mb-1 inline-block" title="Klik untuk melihat rincian di Data Order"><?= htmlspecialchars($r['nama_customer']) ?></a>
+                            <p class="text-[11px] text-[#8b949e] flex items-center"><i class="fa-solid fa-phone mr-1.5 text-gray-500"></i> <?= htmlspecialchars($r['no_hp']) ?></p>
+                            <p class="text-[10px] text-[#8b949e] mt-1">Tgl Tanam: <span class="font-bold text-[#d29922]"><?= formatTgl($r['tgl_tanam']) ?></span></p>
+                        </td>
+                        <td class="py-4 px-4 text-[11px] leading-relaxed text-[#c9d1d9] relative z-10"><?= $r['detail_barang'] ?></td>
+                        
+                        <td class="py-4 px-4 text-center relative z-10" onclick="event.stopPropagation()">
+                            <?php 
+                                $prog_m = (float)($r['progres'] ?? 0);
+                                $total_m = (float)$r['total_meter'];
+                                $persen = ($total_m > 0) ? round(($prog_m / $total_m) * 100) : 0;
+                                if($persen > 100) $persen = 100;
+                            ?>
+                            <div class="flex items-center justify-center gap-3">
+                                <div class="flex flex-col gap-1 items-center justify-center w-full max-w-[90px]">
+                                    <span class="text-[11px] font-bold text-[#c9d1d9]"><?= $prog_m ?>m <span class="text-gray-500 font-normal">/ <?= $total_m ?>m</span></span>
+                                    <div class="w-full bg-[#0d1117] rounded-full h-1.5 border border-[#30363d] overflow-hidden">
+                                        <div class="bg-[#3fb950] h-1.5 rounded-full" style="width: <?= $persen ?>%"></div>
+                                    </div>
+                                    <span class="text-[10px] font-bold text-[#3fb950] mt-0.5"><?= $persen ?>%</span>
+                                </div>
+                                <button type="button" onclick="bukaUpdateProgresTable('<?= $r['no_order'] ?>', <?= $prog_m ?>, <?= $total_m ?>)" class="w-7 h-7 flex-shrink-0 bg-[#21262d] border border-[#30363d] text-[#8957e5] rounded flex justify-center items-center hover:bg-[#30363d] transition-colors" title="Update Progres">
+                                    <i class="fa-solid fa-pen text-[10px]"></i>
+                                </button>
+                            </div>
+                        </td>
+                        
+                        <td class="py-4 px-4 text-center font-bold text-white text-[12px]"><?= formatRp($r['total_belanja']) ?></td>
+                        <td class="py-4 px-4 text-center text-[#8b949e] text-[12px]"><?= formatRp($r['total_dibayar']) ?></td>
+                        
+                        <?php if($r['sisa_tagihan'] <= 0): ?>
+                        <td class="py-4 px-4 text-center font-bold text-[#3fb950] text-[12px]">Lunas</td>
+                        <?php else: ?>
+                        <td class="py-4 px-4 text-center font-bold text-[#f85149] text-[12px]"><?= formatRp($r['sisa_tagihan']) ?></td>
+                        <?php endif; ?>
+                        
+                        <td class="py-4 px-4 text-center">
+                            <div class="flex flex-col items-center justify-center gap-2">
+                                <?php if($r['sisa_tagihan'] > 0): ?>
+                                <a href="?page=jasa-tanam&action=update_status&no_order=<?= $r['no_order'] ?>&status_baru=Lunas" onclick="return confirm('Lunasi transaksi ini?')" class="w-full bg-[#d29922] hover:bg-yellow-600 text-white px-3 py-1.5 rounded-md text-[11px] font-bold shadow transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap"><i class="fa-solid fa-money-bill-wave"></i> Lunasi</a>
+                                <?php else: ?>
+                                <a href="?page=jasa-tanam&action=update_status&no_order=<?= $r['no_order'] ?>&status_baru=Selesai" onclick="return confirm('Selesaikan/Arsipkan transaksi ini?')" class="w-full bg-[#238636] hover:bg-[#2ea043] text-white px-3 py-1.5 rounded-md text-[11px] font-bold shadow transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap"><i class="fa-solid fa-check-double"></i> Selesaikan</a>
+                                <?php endif; ?>
+                                
+                                <a href="cetak/invoice-jasa-tanam.php?no_order=<?= $r['no_order'] ?>" target="_blank" class="w-full bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-[#c9d1d9] px-3 py-1.5 rounded-md text-[11px] font-bold shadow transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap"><i class="fa-solid fa-print"></i> Cetak</a>
+                            </div>
+                        </td>
+                    </tr>
+                    <?php endwhile; else: ?>
+                    <tr><td colspan="8" class="text-center py-8 text-[#8b949e] text-[12px]">Tidak ada transaksi aktif yang perlu diselesaikan.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <script>
+        const sAktif = document.getElementById('searchAktif');
+        const trAktif = document.querySelectorAll('.tr-aktif');
+        if(sAktif) {
+            sAktif.addEventListener('input', function() {
+                let v = this.value.toLowerCase();
+                trAktif.forEach(tr => {
+                    if(tr.getAttribute('data-search').includes(v)) tr.style.display = '';
+                    else tr.style.display = 'none';
+                });
+            });
+        }
+    </script>
     <?php endif; ?>
 </div>
 
+<?php
+    // Fetch ketersediaan baris kosong untuk dropdown Tukar Baris (Dibutuhkan di tab data & aktif)
+    $q_baris_kosong = mysqli_query($conn, "SELECT b.id_baris, b.tersedia_m, v.nama_varietas FROM bibit_baris b LEFT JOIN varietas_bibit v ON b.id_varietas = v.id WHERE b.tersedia_m > 0 ORDER BY b.id_baris ASC");
+    $js_baris_kosong = [];
+    if($q_baris_kosong) {
+        while($rb = mysqli_fetch_assoc($q_baris_kosong)) {
+            $js_baris_kosong[] = ['id' => $rb['id_baris'], 'm' => (float)$rb['tersedia_m'], 'var' => $rb['nama_varietas'] ?: 'Bibit'];
+        }
+    }
+?>
 <script>
     const databaseJasaMap = <?= json_encode($js_order_data ?? []) ?>;
+    const barisKosongData = <?= json_encode($js_baris_kosong) ?>;
 
     function bukaModalDetailJasa(noOrder) {
         let data = databaseJasaMap[noOrder];
@@ -747,11 +1244,42 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
             let format_iso = `${parts[2]}-${m_map[parts[1]]}-${parts[0].padStart(2,'0')}`;
             document.getElementById('form_eo_tgl_t').value = format_iso;
             document.getElementById('form_eo_ket').value = data.keterangan === '-' ? '' : data.keterangan;
+            let biaya = data.biaya_tambahan ? data.biaya_tambahan.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".") : "";
+            document.getElementById('form_eo_biaya_tambahan').value = biaya;
+            document.getElementById('form_eo_ket_biaya_tambahan').value = data.ket_biaya_tambahan || '';
             
             document.getElementById('modal-edit-jasa').classList.remove('hidden');
         }
     }
     function tutupEditJasaTanamModal() { document.getElementById('modal-edit-jasa').classList.add('hidden'); }
+
+    function bukaGantiBarisModal() {
+        let noOrder = document.getElementById('m_no_order').innerText;
+        let data = databaseJasaMap[noOrder];
+        if(data) {
+            tutupModalDetailJasa();
+            document.getElementById('gb_no_order').value = data.no_order;
+            
+            let selOld = document.getElementById('gb_old_id');
+            selOld.innerHTML = '';
+            data.baris_asli.forEach(b => {
+                let opt = document.createElement('option');
+                opt.value = b; opt.innerText = "Baris #" + b;
+                selOld.appendChild(opt);
+            });
+
+            let selNew = document.getElementById('gb_new_id');
+            selNew.innerHTML = '<option value="">-- Pilih Baris Tujuan --</option>';
+            barisKosongData.forEach(b => {
+                let opt = document.createElement('option');
+                opt.value = b.id; opt.innerText = "Baris #" + b.id + " (" + b.var + " - Sisa " + b.m + "m)";
+                selNew.appendChild(opt);
+            });
+
+            document.getElementById('modal-ganti-baris').classList.remove('hidden');
+        }
+    }
+    function tutupGantiBarisModal() { document.getElementById('modal-ganti-baris').classList.add('hidden'); }
 
     function konfirmasiUbahStatus(selectElement, noOrder, statusLama) {
             let statusBaru = selectElement.value;
@@ -794,6 +1322,49 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
     const statusFilterJasa = document.getElementById('filterStatusJasa'); 
     const rowsJasa = document.querySelectorAll('.baris-order-jasa');
     
+    function bukaUbahVolumeModal() {
+        let noOrder = document.getElementById('m_no_order').innerText;
+        let data = databaseJasaMap[noOrder];
+        if(data) {
+            tutupModalDetailJasa();
+            document.getElementById('uv_no_order').value = data.no_order;
+            
+            let selBaris = document.getElementById('uv_id_baris');
+            selBaris.innerHTML = '';
+            data.baris_asli.forEach(b => {
+                let opt = document.createElement('option');
+                opt.value = b; 
+                opt.text = "Baris #" + b;
+                selBaris.appendChild(opt);
+            });
+            document.getElementById('uv_volume_baru').value = '';
+            document.getElementById('modal-ubah-volume').classList.remove('hidden');
+        }
+    }
+    function tutupUbahVolumeModal() { document.getElementById('modal-ubah-volume').classList.add('hidden'); }
+
+    function bukaTambahBarisModal() {
+        let noOrder = document.getElementById('m_no_order').innerText;
+        let data = databaseJasaMap[noOrder];
+        if(data) {
+            tutupModalDetailJasa();
+            document.getElementById('tb_no_order').value = data.no_order;
+            
+            let selBaris = document.getElementById('tb_id_baris');
+            selBaris.innerHTML = '<option value="">-- Pilih Baris Kosong --</option>';
+            barisKosongData.forEach(b => {
+                let opt = document.createElement('option');
+                opt.value = b.id; opt.innerText = "Baris #" + b.id + " (" + b.var + " - Sisa " + b.m + "m)";
+                selBaris.appendChild(opt);
+            });
+            document.getElementById('tb_meter_tambahan').value = '';
+            document.getElementById('modal-tambah-baris').classList.remove('hidden');
+        }
+    }
+    function tutupTambahBarisModal() { document.getElementById('modal-tambah-baris').classList.add('hidden'); }
+
+
+
     function filterTableJasa() { 
         let searchVal = searchInputJasa.value.toLowerCase(); 
         let statusVal = statusFilterJasa.value; 
@@ -813,9 +1384,30 @@ while($r = mysqli_fetch_assoc($q_lahan)) {
             } 
         }); 
     }
+    function bukaUpdateProgresTable(noOrder, currentM, maxM) {
+        document.getElementById('up_no_order').value = noOrder;
+        document.getElementById('up_total_meter').innerText = maxM + " Meter";
+        document.getElementById('up_progres_input').max = maxM;
+        document.getElementById('up_progres_input').value = currentM;
+        document.getElementById('modal-update-progres').classList.remove('hidden');
+    }
+    function tutupUpdateProgresModal() { document.getElementById('modal-update-progres').classList.add('hidden'); }
     
+
     if(searchInputJasa) searchInputJasa.addEventListener('input', filterTableJasa); 
     if(statusFilterJasa) statusFilterJasa.addEventListener('change', filterTableJasa);
+
+    const inputBiaya = document.getElementById('form_eo_biaya_tambahan');
+    if (inputBiaya) {
+        inputBiaya.addEventListener('input', function(e) {
+            let val = this.value.replace(/[^0-9]/g, '');
+            if (val !== '') {
+                this.value = val.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+            } else {
+                this.value = '';
+            }
+        });
+    }
 </script>
 
 <style>

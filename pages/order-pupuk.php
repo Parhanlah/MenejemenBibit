@@ -30,14 +30,22 @@ if (isset($_GET['action']) && $_GET['action'] == 'update_status' && isset($_GET[
         $status_sebelumnya = $order_lama['status'];
 
         if (in_array($status_baru, ['Lunas', 'Selesai'])) {
-            mysqli_query($conn, "UPDATE order_pupuk SET status='$status_baru', dp_dibayar=total_harga WHERE no_order='$no_order'");
+            mysqli_query($conn, "UPDATE order_pupuk SET status='$status_baru', nominal_pelunasan=(total_harga - dp_dibayar), tgl_lunas='$tgl_hari_ini' WHERE no_order='$no_order'");
         } 
         else if ($status_baru == 'Batal') {
             if ($status_sebelumnya != 'Batal') { 
                 // Kembalikan SEMUA stok ke gudang jika dibatalkan
-                $q_items = mysqli_query($conn, "SELECT id_barang, qty FROM order_pupuk WHERE no_order='$no_order'");
+                $q_items = mysqli_query($conn, "SELECT id_barang, tipe_item, qty FROM order_pupuk WHERE no_order='$no_order'");
                 while($itm = mysqli_fetch_assoc($q_items)){
-                    mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok + {$itm['qty']} WHERE id='{$itm['id_barang']}'");
+                    if ($itm['tipe_item'] == 'Paket') {
+                        $q_pi = mysqli_query($conn, "SELECT id_barang, qty FROM paket_pupuk_item WHERE id_paket='{$itm['id_barang']}'");
+                        while($pi = mysqli_fetch_assoc($q_pi)) {
+                            $jml_balik = $pi['qty'] * $itm['qty'];
+                            mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok + $jml_balik WHERE id='{$pi['id_barang']}'");
+                        }
+                    } else {
+                        mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok + {$itm['qty']} WHERE id='{$itm['id_barang']}'");
+                    }
                 }
             }
             mysqli_query($conn, "UPDATE order_pupuk SET status='Batal' WHERE no_order='$no_order'");
@@ -45,9 +53,17 @@ if (isset($_GET['action']) && $_GET['action'] == 'update_status' && isset($_GET[
         else {
             if ($status_sebelumnya == 'Batal') {
                 // Tarik kembali SEMUA stok dari gudang jika tadinya batal lalu dihidupkan lagi
-                $q_items = mysqli_query($conn, "SELECT id_barang, qty FROM order_pupuk WHERE no_order='$no_order'");
+                $q_items = mysqli_query($conn, "SELECT id_barang, tipe_item, qty FROM order_pupuk WHERE no_order='$no_order'");
                 while($itm = mysqli_fetch_assoc($q_items)){
-                    mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok - {$itm['qty']} WHERE id='{$itm['id_barang']}'");
+                    if ($itm['tipe_item'] == 'Paket') {
+                        $q_pi = mysqli_query($conn, "SELECT id_barang, qty FROM paket_pupuk_item WHERE id_paket='{$itm['id_barang']}'");
+                        while($pi = mysqli_fetch_assoc($q_pi)) {
+                            $jml_potong = $pi['qty'] * $itm['qty'];
+                            mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok - $jml_potong WHERE id='{$pi['id_barang']}'");
+                        }
+                    } else {
+                        mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok - {$itm['qty']} WHERE id='{$itm['id_barang']}'");
+                    }
                 }
             }
             mysqli_query($conn, "UPDATE order_pupuk SET status='$status_baru' WHERE no_order='$no_order'");
@@ -55,6 +71,18 @@ if (isset($_GET['action']) && $_GET['action'] == 'update_status' && isset($_GET[
         echo "<script>window.location.href='?page=order-pupuk&tab=data&highlight=$no_order';</script>";
         exit;
     }
+}
+
+// =========================================================================
+// 1.5 AUTO-CREATE KOLOM BARU (DP & PELUNASAN)
+// =========================================================================
+$cek_kolom_pupuk = mysqli_query($conn, "SHOW COLUMNS FROM `order_pupuk` LIKE 'nominal_pelunasan'");
+if(mysqli_num_rows($cek_kolom_pupuk) == 0) {
+    mysqli_query($conn, "ALTER TABLE `order_pupuk` ADD `nominal_pelunasan` int(11) DEFAULT 0 AFTER `dp_dibayar`, ADD `tgl_lunas` date DEFAULT NULL AFTER `nominal_pelunasan`");
+}
+$cek_kolom_tipe = mysqli_query($conn, "SHOW COLUMNS FROM `order_pupuk` LIKE 'tipe_item'");
+if(mysqli_num_rows($cek_kolom_tipe) == 0) {
+    mysqli_query($conn, "ALTER TABLE `order_pupuk` ADD `tipe_item` varchar(20) DEFAULT 'Satuan' AFTER `id_barang`");
 }
 
 // =========================================================================
@@ -79,28 +107,62 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['simpan_order_pupuk']))
 
     // Validasi Stok dan Kumpulkan Data Barang
     for($i = 0; $i < count($id_barangs); $i++) {
-        $id_b = (int)$id_barangs[$i];
+        $val_raw = $id_barangs[$i];
         $qty_b = (int)$qtys[$i];
 
-        if($id_b > 0 && $qty_b > 0) {
-            $q_brg = mysqli_query($conn, "SELECT nama, harga, stok FROM stok_pupuk WHERE id='$id_b'");
-            $brg = mysqli_fetch_assoc($q_brg);
-            
-            if($brg['stok'] < $qty_b) { 
-                echo "<script>alert('Gagal! Stok ".$brg['nama']." tersisa hanya ".$brg['stok'].".'); window.history.back();</script>"; exit; 
+        if($val_raw != "" && $qty_b > 0) {
+            if (strpos($val_raw, 'P_') === 0) {
+                // Tipe Paket
+                $id_p = (int)str_replace('P_', '', $val_raw);
+                $q_pkt = mysqli_query($conn, "SELECT nama, harga FROM paket_pupuk WHERE id='$id_p'");
+                $pkt = mysqli_fetch_assoc($q_pkt);
+                
+                // Cek stok isi paket
+                $q_items = mysqli_query($conn, "SELECT ppi.qty as pkt_qty, sp.stok, sp.nama FROM paket_pupuk_item ppi JOIN stok_pupuk sp ON ppi.id_barang = sp.id WHERE ppi.id_paket='$id_p'");
+                $items_in_paket = [];
+                while($itm = mysqli_fetch_assoc($q_items)) {
+                    $butuh_stok = $itm['pkt_qty'] * $qty_b;
+                    if($itm['stok'] < $butuh_stok) {
+                        echo "<script>alert('Gagal! Stok ".$itm['nama']." tidak mencukupi untuk meracik paket ini.'); window.history.back();</script>"; exit; 
+                    }
+                    $items_in_paket[] = ['id_barang' => $itm['id_barang'], 'butuh_qty' => $butuh_stok];
+                }
+
+                $harga_satuan = (float)$pkt['harga'];
+                $sub = $harga_satuan * $qty_b;
+                $grand_subtotal += $sub;
+
+                $items_to_insert[] = [
+                    'tipe_item' => 'Paket',
+                    'id' => $id_p,
+                    'nama' => mysqli_real_escape_string($conn, $pkt['nama']),
+                    'qty' => $qty_b,
+                    'harga' => $harga_satuan,
+                    'subtotal' => $sub
+                ];
+            } else {
+                // Tipe Satuan
+                $id_b = (int)str_replace('S_', '', $val_raw);
+                $q_brg = mysqli_query($conn, "SELECT nama, harga, stok FROM stok_pupuk WHERE id='$id_b'");
+                $brg = mysqli_fetch_assoc($q_brg);
+                
+                if($brg['stok'] < $qty_b) { 
+                    echo "<script>alert('Gagal! Stok ".$brg['nama']." tersisa hanya ".$brg['stok'].".'); window.history.back();</script>"; exit; 
+                }
+
+                $harga_satuan = (float)$brg['harga'];
+                $sub = $harga_satuan * $qty_b;
+                $grand_subtotal += $sub;
+
+                $items_to_insert[] = [
+                    'tipe_item' => 'Satuan',
+                    'id' => $id_b,
+                    'nama' => mysqli_real_escape_string($conn, $brg['nama']),
+                    'qty' => $qty_b,
+                    'harga' => $harga_satuan,
+                    'subtotal' => $sub
+                ];
             }
-
-            $harga_satuan = (float)$brg['harga'];
-            $sub = $harga_satuan * $qty_b;
-            $grand_subtotal += $sub;
-
-            $items_to_insert[] = [
-                'id' => $id_b,
-                'nama' => mysqli_real_escape_string($conn, $brg['nama']),
-                'qty' => $qty_b,
-                'harga' => $harga_satuan,
-                'subtotal' => $sub
-            ];
         }
     }
 
@@ -110,8 +172,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['simpan_order_pupuk']))
     $tahun = date('Y');
     $bulan_romawi = getRomawi(date('m'));
     
-    $q_max = mysqli_query($conn, "SELECT MAX(id) as max_id FROM order_pupuk");
-    $next_id = mysqli_fetch_assoc($q_max)['max_id'] + 1;
+    $q_max = mysqli_query($conn, "SELECT no_order FROM order_pupuk ORDER BY id DESC LIMIT 1");
+    if(mysqli_num_rows($q_max) > 0) {
+        $last_order = mysqli_fetch_assoc($q_max)['no_order'];
+        $parts = explode('/', $last_order);
+        $next_id = isset($parts[2]) ? (int)$parts[2] + 1 : 1;
+    } else {
+        $next_id = 1;
+    }
     $nomor_urut = str_pad($next_id, 4, '0', STR_PAD_LEFT);
     
     $no_order = "INV-PUPUKDANOBAT/PCT/$nomor_urut/$bulan_romawi/$tahun";
@@ -141,22 +209,53 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['simpan_order_pupuk']))
     $dp_total = isset($_POST['bayar']) && $_POST['bayar'] == 'dp' ? (int)str_replace('.', '', $_POST['nominal_dp']) : $final_total;
     $status_init = ($dp_total >= $final_total) ? 'Lunas' : 'DP';
 
+    // Variabel sisa untuk last item fix rounding
+    $sisa_diskon_n = $diskon_n;
+    $sisa_ongkir = $ongkir;
+    $sisa_dp = $dp_total;
+    $sisa_final = $final_total;
+    
+    $count_items = count($items_to_insert);
+    $idx = 0;
+
     // Insert Database (Looping per barang di keranjang)
     foreach($items_to_insert as $itm) {
-        $rasio = ($grand_subtotal > 0) ? ($itm['subtotal'] / $grand_subtotal) : 1;
-        
-        $item_diskon_n = round($diskon_n * $rasio);
-        $item_ongkir = round($ongkir * $rasio);
-        $item_dp = round($dp_total * $rasio);
-        
-        $item_final = $itm['subtotal'] - ($itm['subtotal'] * ($diskon_p / 100)) - $item_diskon_n + $item_ongkir;
-        if($item_final < 0) $item_final = 0;
+        $idx++;
+        if ($idx == $count_items) {
+            $item_diskon_n = $sisa_diskon_n;
+            $item_ongkir = $sisa_ongkir;
+            $item_dp = $sisa_dp;
+            $item_final = $sisa_final;
+        } else {
+            $rasio = ($grand_subtotal > 0) ? ($itm['subtotal'] / $grand_subtotal) : 1;
+            
+            $item_diskon_n = round($diskon_n * $rasio);
+            $item_ongkir = round($ongkir * $rasio);
+            $item_dp = round($dp_total * $rasio);
+            
+            $item_final = $itm['subtotal'] - ($itm['subtotal'] * ($diskon_p / 100)) - $item_diskon_n + $item_ongkir;
+            if($item_final < 0) $item_final = 0;
+            
+            $sisa_diskon_n -= $item_diskon_n;
+            $sisa_ongkir -= $item_ongkir;
+            $sisa_dp -= $item_dp;
+            $sisa_final -= $item_final;
+        }
 
         mysqli_query($conn, "INSERT INTO order_pupuk 
-            (no_order, tgl_order, nama_customer, no_hp, alamat, id_barang, nama_barang, qty, harga_satuan, diskon_persen, diskon_nominal, ongkir, total_harga, dp_dibayar, status, keterangan) 
-            VALUES ('$no_order', '$tgl_order', '$nama', '$hp', '$alamat', '{$itm['id']}', '{$itm['nama']}', '{$itm['qty']}', '{$itm['harga']}', '$diskon_p', '$item_diskon_n', '$item_ongkir', '$item_final', '$item_dp', '$status_init', '$ket')");
+            (no_order, tgl_order, nama_customer, no_hp, alamat, id_barang, tipe_item, nama_barang, qty, harga_satuan, diskon_persen, diskon_nominal, ongkir, total_harga, dp_dibayar, status, keterangan) 
+            VALUES ('$no_order', '$tgl_order', '$nama', '$hp', '$alamat', '{$itm['id']}', '{$itm['tipe_item']}', '{$itm['nama']}', '{$itm['qty']}', '{$itm['harga']}', '$diskon_p', '$item_diskon_n', '$item_ongkir', '$item_final', '$item_dp', '$status_init', '$ket')");
 
-        mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok - {$itm['qty']} WHERE id='{$itm['id']}'");
+        // Kurangi Stok
+        if ($itm['tipe_item'] == 'Paket') {
+            $q_items = mysqli_query($conn, "SELECT id_barang, qty FROM paket_pupuk_item WHERE id_paket='{$itm['id']}'");
+            while($pi = mysqli_fetch_assoc($q_items)) {
+                $jml_potong = $pi['qty'] * $itm['qty'];
+                mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok - $jml_potong WHERE id='{$pi['id_barang']}'");
+            }
+        } else {
+            mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok - {$itm['qty']} WHERE id='{$itm['id']}'");
+        }
     }
 
     echo "<script>alert('Berhasil! Order Pupuk & Obat $no_order tersimpan.'); window.location.href='?page=order-pupuk&tab=data';</script>"; exit;
@@ -166,10 +265,18 @@ if (isset($_GET['action']) && $_GET['action'] == 'hapus_permanen' && isset($_GET
     $no_order = mysqli_real_escape_string($conn, $_GET['no_order']);
     
     // Kembalikan stok gudang (Semua Barang)
-    $q_o = mysqli_query($conn, "SELECT id_barang, qty, status FROM order_pupuk WHERE no_order='$no_order'");
+    $q_o = mysqli_query($conn, "SELECT id_barang, tipe_item, qty, status FROM order_pupuk WHERE no_order='$no_order'");
     while($o = mysqli_fetch_assoc($q_o)) {
         if ($o['status'] != 'Batal') {
-            mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok + {$o['qty']} WHERE id='{$o['id_barang']}'");
+            if ($o['tipe_item'] == 'Paket') {
+                $q_items = mysqli_query($conn, "SELECT id_barang, qty FROM paket_pupuk_item WHERE id_paket='{$o['id_barang']}'");
+                while($pi = mysqli_fetch_assoc($q_items)) {
+                    $jml_balik = $pi['qty'] * $o['qty'];
+                    mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok + $jml_balik WHERE id='{$pi['id_barang']}'");
+                }
+            } else {
+                mysqli_query($conn, "UPDATE stok_pupuk SET stok = stok + {$o['qty']} WHERE id='{$o['id_barang']}'");
+            }
         }
     }
     mysqli_query($conn, "DELETE FROM order_pupuk WHERE no_order='$no_order'");
@@ -178,10 +285,23 @@ if (isset($_GET['action']) && $_GET['action'] == 'hapus_permanen' && isset($_GET
 
 // Data Barang untuk Dropdown
 $q_stok = mysqli_query($conn, "SELECT * FROM stok_pupuk WHERE stok > 0 ORDER BY nama ASC");
-$opsi_html = '<option value="" data-harga="0" data-stok="0">-- Pilih Produk --</option>';
-while($r = mysqli_fetch_assoc($q_stok)) { 
-    $opsi_html .= '<option value="'.$r['id'].'" data-harga="'.$r['harga'].'" data-stok="'.$r['stok'].'">'.$r['kode'].' - '.$r['nama'].' (Stok: '.$r['stok'].' '.$r['satuan'].')</option>'; 
+$opsi_html = '<option value="" data-harga="0" data-stok="0" data-tipe="none">-- Pilih Produk / Paket --</option>';
+
+$opsi_html .= '<optgroup label="Paket Bundling">';
+$q_paket = mysqli_query($conn, "SELECT * FROM paket_pupuk ORDER BY nama ASC");
+if($q_paket) {
+    while($rp = mysqli_fetch_assoc($q_paket)) {
+        // Asumsikan stok paket "unlimited" di UI, tervalidasi di backend
+        $opsi_html .= '<option value="P_'.$rp['id'].'" data-harga="'.$rp['harga'].'" data-stok="99999" data-tipe="paket">[PAKET] '.$rp['nama'].'</option>';
+    }
 }
+$opsi_html .= '</optgroup>';
+
+$opsi_html .= '<optgroup label="Barang Satuan">';
+while($r = mysqli_fetch_assoc($q_stok)) { 
+    $opsi_html .= '<option value="S_'.$r['id'].'" data-harga="'.$r['harga'].'" data-stok="'.$r['stok'].'" data-tipe="satuan">'.$r['nama'].' (Stok: '.$r['stok'].' '.$r['satuan'].')</option>'; 
+}
+$opsi_html .= '</optgroup>';
 ?>
 
 <div class="bg-white dark:bg-[#0d1117] min-h-full rounded-xl p-4 md:p-6 shadow border border-gray-100 dark:border-[#30363d] transition-colors duration-200">
@@ -386,7 +506,7 @@ while($r = mysqli_fetch_assoc($q_stok)) {
                     grandSub += (harga * qty);
                     totalQty += qty;
                     
-                    let namaOri = opt.text.split(' - ')[1];
+                    let namaOri = opt.text.replace('[PAKET] ', '');
                     let namaClean = namaOri.split(' (Stok:')[0];
                     txtItem.push(namaClean + " (" + qty + ")");
                 }
@@ -426,6 +546,7 @@ while($r = mysqli_fetch_assoc($q_stok)) {
                 no_order, tgl_order, nama_customer, no_hp, status, 
                 SUM(total_harga) as grand_total, 
                 SUM(dp_dibayar) as grand_dp, 
+                SUM(nominal_pelunasan) as grand_pelunasan,
                 SUM(ongkir) as total_ongkir,
                 GROUP_CONCAT(CONCAT(nama_barang, ' (', qty, ' Pcs)') SEPARATOR '<br>') as detail_barang
             FROM order_pupuk 
@@ -476,6 +597,10 @@ while($r = mysqli_fetch_assoc($q_stok)) {
                             $dp = $o['grand_dp'];
                             $sisa = $o['grand_total'] - $dp;
 
+                            if (in_array(strtolower($o['status']), ['lunas', 'selesai'])) {
+                                $sisa = 0;
+                            }
+
                             $txt_dp = $dp > 0 ? 'Rp '.number_format($dp,0,',','.') : '-';
                             $txt_sisa = $sisa <= 0 ? '<span class="text-gray-400">Lunas</span>' : 'Rp '.number_format($sisa,0,',','.');
 
@@ -519,7 +644,12 @@ while($r = mysqli_fetch_assoc($q_stok)) {
                                             <span class="text-[10px] text-gray-500 italic font-bold text-[#f85149]">Dibatalkan</span>
                                         <?php endif; ?>
                                     </div>
-                                    <a href="cetak/invoice-pupuk.php?id=<?= urlencode($o['no_order']) ?>" target="_blank" class="w-6 h-6 rounded flex items-center justify-center text-[#58a6ff] hover:bg-[#58a6ff]/10 transition-colors" title="Cetak Invoice"><i class="fa-solid fa-print"></i></a>
+                                    <?php if ($o['grand_pelunasan'] > 0): ?>
+                                        <a href="cetak/invoice-pupuk.php?id=<?= urlencode($o['no_order']) ?>&jenis=dp" target="_blank" class="w-6 h-6 rounded flex items-center justify-center text-[#d29922] hover:bg-[#d29922]/10 transition-colors" title="Cetak Struk DP"><i class="fa-solid fa-print"></i></a>
+                                        <a href="cetak/invoice-pupuk.php?id=<?= urlencode($o['no_order']) ?>&jenis=lunas" target="_blank" class="w-6 h-6 rounded flex items-center justify-center text-[#3fb950] hover:bg-[#3fb950]/10 transition-colors" title="Cetak Struk Pelunasan"><i class="fa-solid fa-print"></i></a>
+                                    <?php else: ?>
+                                        <a href="cetak/invoice-pupuk.php?id=<?= urlencode($o['no_order']) ?>" target="_blank" class="w-6 h-6 rounded flex items-center justify-center text-[#58a6ff] hover:bg-[#58a6ff]/10 transition-colors" title="Cetak Invoice"><i class="fa-solid fa-print"></i></a>
+                                    <?php endif; ?>
                                     <a href="?page=order-pupuk&tab=data&action=hapus_permanen&no_order=<?= urlencode($o['no_order']) ?>" onclick="return confirm('Hapus PERMANEN nota ini? Semua stok dari nota ini akan kembali ke gudang.')" class="w-6 h-6 rounded flex items-center justify-center text-[#f85149] hover:bg-[#f85149]/10 transition-colors" title="Hapus Order"><i class="fa-regular fa-trash-can"></i></a>
                                 </div>
                             </td>
@@ -597,5 +727,7 @@ while($r = mysqli_fetch_assoc($q_stok)) {
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; } 
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
     </style>
+
     <?php endif; ?>
+
 </div>

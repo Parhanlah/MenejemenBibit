@@ -96,7 +96,7 @@ while($r = mysqli_fetch_assoc($query_baris)) {
             <a href="?page=calendar-persiapan" id="btn-calendar-persiapan" class="flex-1 xl:flex-none bg-gray-100 hover:bg-gray-200 dark:bg-[#21262d] dark:hover:bg-[#30363d] text-gray-700 dark:text-[#c9d1d9] border border-gray-300 dark:border-transparent px-4 py-2 rounded-md text-[13px] font-bold transition-all duration-300 flex items-center justify-center">
                 <i class="fa-regular fa-calendar mr-2"></i> Calendar
             </a>
-            <a href="?page=sebar-bibit" class="flex-1 xl:flex-none bg-[#1f6feb] hover:bg-[#388bfd] text-white px-4 py-2 rounded-md text-[13px] font-bold transition-colors text-center flex items-center justify-center shadow">
+            <a href="?page=sebar-benih" class="flex-1 xl:flex-none bg-[#1f6feb] hover:bg-[#388bfd] text-white px-4 py-2 rounded-md text-[13px] font-bold transition-colors text-center flex items-center justify-center shadow">
                 + Sebar Benih Baru
             </a>
         </div>
@@ -219,10 +219,10 @@ while($r = mysqli_fetch_assoc($query_baris)) {
                                 </div>
                                 <div class="flex gap-2">
                                     <?php if($b['agri_filter'] != 'kosong'): ?>
-                                    <a href="?page=sebar-bibit" class="bg-[#1f6feb] hover:bg-[#388bfd] text-white px-4 py-2 rounded-md text-[12px] font-bold transition-colors text-center shadow-sm">Sebar Ulang Lahan</a>
+                                    <a href="?page=sebar-benih" class="bg-[#1f6feb] hover:bg-[#388bfd] text-white px-4 py-2 rounded-md text-[12px] font-bold transition-colors text-center shadow-sm">Sebar Ulang Lahan</a>
                                     <a href="?page=bibit-baris&sapu_lahan=<?= $b['no'] ?>" onclick="return confirm('PENTING!\nSapu Lahan akan mereset baris ini menjadi 12m Kosong.\nSemua order di baris ini otomatis ditandai \'Diambil\'.\n\nYakin bersihkan baris #<?= $b['no'] ?>?')" class="bg-white dark:bg-[#21262d] text-[#f85149] border border-[#f85149]/30 hover:bg-[#f85149] hover:text-white px-4 py-2 rounded-md text-[12px] font-bold transition-colors text-center shadow-sm"><i class="fa-solid fa-broom mr-1"></i> Sapu Lahan</a>
                                     <?php else: ?>
-                                    <a href="?page=sebar-bibit" class="bg-[#238636] hover:bg-[#2ea043] text-white px-4 py-2 rounded-md text-[12px] font-bold transition-colors text-center shadow-sm"><i class="fa-solid fa-seedling mr-1"></i> Mulai Tanam</a>
+                                    <a href="?page=sebar-benih" class="bg-[#238636] hover:bg-[#2ea043] text-white px-4 py-2 rounded-md text-[12px] font-bold transition-colors text-center shadow-sm"><i class="fa-solid fa-seedling mr-1"></i> Mulai Tanam</a>
                                     <?php endif; ?>
                                 </div>
                             </div>

@@ -2,9 +2,12 @@
 // Keluar dari folder cetak/ lalu masuk ke components/
 include '../components/koneksi.php';
 
-$id_order = isset($_GET['id']) ? mysqli_real_escape_string($conn, $_GET['id']) : '';
+// Ambil parameter dari URL
+$nama_pelanggan = isset($_GET['nama']) ? mysqli_real_escape_string($conn, $_GET['nama']) : '';
+$no_hp = isset($_GET['hp']) ? mysqli_real_escape_string($conn, $_GET['hp']) : '';
 $jenis_cetak = isset($_GET['jenis']) ? $_GET['jenis'] : '';
-if(!$id_order) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>404 - Nota Tidak Ditemukan</h1><p>Nomor invoice tidak valid.</p></div>");
+
+if(!$nama_pelanggan) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>404 - Data Tidak Ditemukan</h1><p>Parameter pelanggan tidak valid.</p></div>");
 
 // =========================================================================================
 // FUNGSI FORMAT RUPIAH & TERBILANG
@@ -44,75 +47,109 @@ function terbilang($nilai) {
 }
 
 // =========================================================================================
-// LOGIKA CERDAS PENCARIAN DATA MULTI-ITEM PUPUK
+// LOGIKA CERDAS PENCARIAN DATA MULTI-ITEM AKTIF JASA TANAM
 // =========================================================================================
-$data = null; $items = []; $tgl_indo = ''; 
-$grand_harga_dasar = 0; $grand_diskon = 0; $grand_ongkir = 0; 
-$total_akhir = 0; $grand_dp = 0; $grand_pelunasan = 0; $grand_sisa = 0;
+$tgl_lunas_history = isset($_GET['tgl']) ? mysqli_real_escape_string($conn, $_GET['tgl']) : '';
+$is_history = isset($_GET['is_history']) ? true : false;
 
-$q = mysqli_query($conn, "SELECT * FROM order_pupuk WHERE no_order='$id_order'");
-while($r = mysqli_fetch_assoc($q)) {
-    if(!$data) {
-        $data = $r; // Ambil identitas dari baris pertama saja
-        $bln = array(1 => 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember');
-        $m = (int)date('m', strtotime($r['tgl_order']));
-        $tgl_indo = date('d', strtotime($r['tgl_order'])) . ' ' . $bln[$m] . ' ' . date('Y', strtotime($r['tgl_order']));
+// Tarik data aktif (ABAIKAN YG SELESAI/BATAL), ATAU data selesai spesifik dari riwayat
+if ($is_history && $tgl_lunas_history) {
+    $q_orders = mysqli_query($conn, "SELECT * FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND tipe_order='Jasa Tanam' AND status='Selesai' AND tgl_lunas='$tgl_lunas_history' ORDER BY id ASC");
+    if(mysqli_num_rows($q_orders) == 0) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>Data Kosong</h1><p>Tidak ada riwayat kontrak jasa tanam yang selesai pada tanggal tersebut.</p></div>");
+} else {
+    $q_orders = mysqli_query($conn, "SELECT * FROM order_bibit WHERE nama_customer='$nama_pelanggan' AND no_hp='$no_hp' AND tipe_order='Jasa Tanam' AND status NOT IN ('Selesai', 'Batal') ORDER BY id ASC");
+    if(mysqli_num_rows($q_orders) == 0) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>Data Kosong</h1><p>Tidak ada kontrak aktif untuk pelanggan ini. Mungkin sudah diselesaikan.</p></div>");
+}
+
+$grouped_orders = [];
+$biaya_tambahan = [];
+
+$alamat_pelanggan = '-';
+$id_terakhir = 1;
+$total_biaya_tambahan_db = 0;
+$ket_biaya_tambahan_db = '';
+
+while($tr = mysqli_fetch_assoc($q_orders)) {
+    $alamat_pelanggan = $tr['alamat'] ?: $tr['lokasi_sawah'] ?: '-';
+    $id_terakhir = $tr['id'];
+
+    if ($tr['id_baris'] === null && strpos($tr['varietas'], 'Biaya Tambahan:') === 0) {
+        $biaya_tambahan[] = [
+            'nama_biaya' => str_replace('Biaya Tambahan: ', '', $tr['varietas']),
+            'nominal' => (int)$tr['total_harga'],
+            'no_order' => $tr['no_order']
+        ];
+        // Note: For active invoice, $grand_dibayar is calculated differently, but we should make sure DP is included.
+        // Actually, let's look at how grand_dibayar is calculated.
+        $grand_dibayar += (int)$tr['dp_dibayar'];
+        continue;
     }
-    
-    $hd_item = $r['harga_satuan'] * $r['qty'];
-    $diskon_item = ($hd_item * ($r['diskon_persen']/100)) + $r['diskon_nominal'];
-    $ongkir_item = $r['ongkir'];
-    
-    // Akumulasi Keseluruhan Nota
-    $grand_harga_dasar += $hd_item;
-    $grand_diskon += $diskon_item;
-    $grand_ongkir += $ongkir_item;
-    $total_akhir += $r['total_harga'];
-    $grand_dp += $r['dp_dibayar'];
-    $grand_pelunasan += $r['nominal_pelunasan'];
-    
-    // Subtotal baris = murni Harga Dasar (Diskon dimasukkan ke total akhir)
-    $subtotal_baris = $hd_item;
 
-    $isi_paket = [];
-    if($r['tipe_item'] == 'Paket') {
-        $id_paket = $r['id_barang'];
-        $qp = mysqli_query($conn, "SELECT sp.nama, ppi.qty FROM paket_pupuk_item ppi JOIN stok_pupuk sp ON ppi.id_barang = sp.id WHERE ppi.id_paket='$id_paket'");
-        if($qp) {
-            while($rip = mysqli_fetch_assoc($qp)) {
-                $isi_paket[] = "- " . $rip['nama'] . " (" . $rip['qty'] . ")";
-            }
+    if (isset($tr['biaya_tambahan']) && $tr['biaya_tambahan'] > 0) {
+        $total_biaya_tambahan_db += (int)$tr['biaya_tambahan'];
+        if(empty($ket_biaya_tambahan_db) && !empty($tr['ket_biaya_tambahan'])) {
+            $ket_biaya_tambahan_db = $tr['ket_biaya_tambahan'];
         }
     }
 
-    $items[] = [
-        'nama' => htmlspecialchars($r['nama_barang']),
-        'qty' => $r['qty'],
-        'harga_satuan' => $r['harga_satuan'],
-        'jumlah_murni' => $subtotal_baris,
-        'isi_paket' => $isi_paket
+    $key = $tr['no_order']; // Pisah per nomor kontrak (no_order)
+    if(!isset($grouped_orders[$key])) {
+        $grouped_orders[$key] = $tr;
+        $grouped_orders[$key]['baris_list'] = [$tr['id_baris']];
+        $grouped_orders[$key]['total_panjang_m'] = (float)$tr['panjang_m'];
+        $grouped_orders[$key]['sum_harga_dasar'] = (int)$tr['harga_dasar'];
+        $grouped_orders[$key]['sum_biaya_jasa'] = (int)$tr['biaya_jasa'];
+        
+        $potongan = ($tr['harga_dasar'] * ((float)$tr['diskon_persen']/100)) + (int)$tr['diskon_nominal'];
+        $grouped_orders[$key]['sum_potongan'] = $potongan;
+        $grouped_orders[$key]['sum_ongkir'] = (int)$tr['ongkir'];
+        $grouped_orders[$key]['sum_total_harga'] = (int)$tr['total_harga'];
+        $grouped_orders[$key]['sum_dp_dibayar'] = (int)$tr['dp_dibayar'];
+        $grouped_orders[$key]['sum_nominal_pelunasan'] = (int)$tr['nominal_pelunasan'];
+    } else {
+        if(!in_array($tr['id_baris'], $grouped_orders[$key]['baris_list'])) {
+            $grouped_orders[$key]['baris_list'][] = $tr['id_baris'];
+        }
+        $grouped_orders[$key]['total_panjang_m'] += (float)$tr['panjang_m'];
+        $grouped_orders[$key]['sum_harga_dasar'] += (int)$tr['harga_dasar'];
+        $grouped_orders[$key]['sum_biaya_jasa'] += (int)$tr['biaya_jasa'];
+        
+        $potongan = ($tr['harga_dasar'] * ((float)$tr['diskon_persen']/100)) + (int)$tr['diskon_nominal'];
+        $grouped_orders[$key]['sum_potongan'] += $potongan;
+        $grouped_orders[$key]['sum_ongkir'] += (int)$tr['ongkir'];
+        $grouped_orders[$key]['sum_total_harga'] += (int)$tr['total_harga'];
+        $grouped_orders[$key]['sum_dp_dibayar'] += (int)$tr['dp_dibayar'];
+        $grouped_orders[$key]['sum_nominal_pelunasan'] += (int)$tr['nominal_pelunasan'];
+    }
+}
+
+if ($total_biaya_tambahan_db > 0) {
+    $biaya_tambahan[] = [
+        'nama_biaya' => ucwords(trim($ket_biaya_tambahan_db)) ?: 'Biaya Operasional',
+        'nominal' => $total_biaya_tambahan_db,
+        'is_in_db_total' => true
     ];
 }
-$grand_sisa = $total_akhir - $grand_dp;
 
-// --- SUNTIKAN ANTI-BUG PEMBULATAN (ROUNDING) ---
-// Membulatkan puluhan terdekat untuk menghilangkan sisa Rp 1 - Rp 9 akibat pecahan proporsional
-$grand_harga_dasar = round($grand_harga_dasar, -1);
-$grand_diskon = round($grand_diskon, -1);
-$grand_ongkir = round($grand_ongkir, -1);
-$total_akhir = round($total_akhir, -1);
-$grand_dp = round($grand_dp, -1);
-$grand_pelunasan = round($grand_pelunasan, -1);
-$grand_sisa = round($grand_sisa, -1);
+// LOGIKA NOMOR INVOICE PER TRANSAKSI
+$first_order_no = '';
+foreach ($grouped_orders as $key => $val) {
+    $first_order_no = $key;
+    break;
+}
 
-if(!$data || count($items) == 0) die("<div style='font-family:sans-serif; text-align:center; padding:50px;'><h1>Data Tidak Ditemukan</h1><p>Pastikan nomor invoice benar dan keranjang tidak kosong.</p></div>");
+// LOGIKA PEMBUATAN NOMOR INVOICE & NAMA FILE
+$bulan_indo = array(1 => 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember');
+$tgl_cetak = date('d') . ' ' . $bulan_indo[(int)date('m')] . ' ' . date('Y');
 
-// LOGIKA PEMBUATAN NAMA FILE DOWNLOAD (PDF)
-$safe_id_order = str_replace('/', '-', $id_order);
-$nama_file = ucwords(trim($data['nama_customer'] ?? ''));
-$alamat_file = trim($data['alamat'] ?? '');
+// Sinkronisasi nomor invoice dengan Laporan Utama
+// Jika no_order adalah JT-2026-0001, maka invoice menjadi INV-PCT/JT/2026-0001
+$no_invoice = "INV-" . str_replace('JT-', 'PCT/JT/', $first_order_no);
 
-$judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
+$safe_no_invoice = str_replace('/', '-', $no_invoice);
+$nama_file = ucwords(trim($nama_pelanggan));
+$alamat_file = trim($alamat_pelanggan);
+$judul_dokumen = $safe_no_invoice . " - " . $nama_file . " - " . $alamat_file;
 ?>
 
 <!DOCTYPE html>
@@ -155,19 +192,6 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
         .color-primary { color: #0F314F; }
         .color-accent { color: #35B04A; }
         
-        .watermark-batal {
-            position: absolute; top: 35%; left: 50%; transform: translate(-50%, -50%) rotate(-45deg);
-            font-size: 120px; font-weight: 900; color: rgba(248, 81, 73, 0.2);
-            border: 10px solid rgba(248, 81, 73, 0.2); padding: 20px 50px; border-radius: 30px;
-            z-index: 9999; pointer-events: none; white-space: nowrap; text-transform: uppercase;
-        }
-        .watermark-lunas {
-            position: absolute; top: 35%; left: 50%; transform: translate(-50%, -50%) rotate(-45deg);
-            font-size: 120px; font-weight: 900; color: rgba(53, 176, 74, 0.15);
-            border: 10px solid rgba(53, 176, 74, 0.15); padding: 20px 50px; border-radius: 30px;
-            z-index: 9999; pointer-events: none; white-space: nowrap; text-transform: uppercase;
-        }
-
         .header-wrap { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 25px; border-bottom: 2px solid #eee; padding-bottom: 20px; margin-top: 10px;}
         .brand-logo { width: 260px; margin-bottom: 8px; } 
         .brand-sub { font-size: 13px; color: #555; line-height: 1.5; }
@@ -181,7 +205,7 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
         .info-value { font-size: 14px; font-weight: 700; color: #111; margin-bottom: 12px; }
         .info-value:last-child { margin-bottom: 0; }
         
-        /* TABEL BARANG */
+        /* TABEL BARANG (Format Lebar Sama Persis Dengan Pupuk) */
         table { width: 100%; border-collapse: collapse; margin-bottom: 20px; background-color: transparent; }
         th { background-color: #0F314F; color: white; padding: 10px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid #0F314F; text-align: center;}
         td { padding: 10px 8px; font-size: 12px; border: 1px solid #ddd; border-left: 1px solid #0F314F; border-right: 1px solid #0F314F; background-color: transparent; color: #222;}
@@ -226,11 +250,6 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
     </div>
 
     <div class="a4-container">
-        <?php if($data['status'] == 'Batal'): ?>
-            <div class="watermark-batal">DIBATALKAN</div>
-        <?php elseif(in_array($data['status'], ['Lunas', 'Selesai'])): ?>
-            <div class="watermark-lunas">L U N A S</div>
-        <?php endif; ?>
         
         <!-- HEADER -->
         <div class="header-wrap">
@@ -248,7 +267,7 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
                     elseif($jenis_cetak == 'lunas') echo "INVOICE LUNAS";
                     else echo "INVOICE";
                 ?></h2>
-                <p class="color-primary"><?= isset($data['no_order']) ? $data['no_order'] : $id_order ?></p>
+                <p class="color-primary"><?= $no_invoice ?></p>
             </div>
         </div>
 
@@ -256,15 +275,15 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
         <div class="info-box">
             <div class="info-group">
                 <div class="info-label">DITAGIHKAN KEPADA:</div>
-                <div class="info-value" style="font-size: 16px; color: #0F314F;"><?= ucwords(htmlspecialchars($data['nama_customer'])) ?></div>
+                <div class="info-value" style="font-size: 16px; color: #0F314F;"><?= ucwords(htmlspecialchars($nama_pelanggan)) ?></div>
                 <div class="info-label">NO. HANDPHONE:</div>
-                <div class="info-value"><?= htmlspecialchars($data['no_hp'] ?: '-') ?></div>
+                <div class="info-value"><?= htmlspecialchars($no_hp ?: '-') ?></div>
             </div>
             <div class="info-group">
                 <div class="info-label">TANGGAL INVOICE:</div>
-                <div class="info-value"><?= $tgl_indo ?></div>
-                <div class="info-label">ALAMAT PENGIRIMAN:</div>
-                <div class="info-value"><?= htmlspecialchars($data['alamat']) ?></div>
+                <div class="info-value"><?= $tgl_cetak ?></div>
+                <div class="info-label">ALAMAT / LOKASI:</div>
+                <div class="info-value"><?= htmlspecialchars($alamat_pelanggan) ?></div>
             </div>
         </div>
 
@@ -273,50 +292,124 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
             <thead>
                 <tr>
                     <th width="5%">NO</th>
-                    <th width="49%" class="text-left">DESKRIPSI PRODUK</th>
+                    <th width="49%" class="text-left">DESKRIPSI TRANSAKSI</th>
                     <th width="10%" class="text-center">QTY</th>
                     <th width="18%" class="text-right">HARGA SATUAN</th>
                     <th width="18%" class="text-right">JUMLAH (Rp)</th>
                 </tr>
             </thead>
             <tbody>
-                <?php $no = 1; foreach($items as $item): ?>
+                <?php 
+                $no = 1; 
+                $grand_harga_dasar = 0; $grand_biaya_jasa = 0; $grand_diskon = 0; $grand_ongkir = 0; 
+                $grand_total = 0; $grand_dibayar = 0;
+
+                foreach($grouped_orders as $tr): 
+                    $panjang = (float)$tr['total_panjang_m'];
+                    
+                    // Satuan Iring (1 Iring = 6 Meter)
+                    $jml_iring = $panjang / 6;
+                    $qty_str = str_replace('.0', '', (string)$jml_iring) . " Iring";
+                    // Only show first 5 baris + ... if too long to prevent row height blow up
+                    $baris_str = implode(", ", array_slice($tr['baris_list'], 0, 8));
+                    if(count($tr['baris_list']) > 8) $baris_str .= ", dll (" . count($tr['baris_list']) . " baris)";
+                    $list_baris = "Baris Lahan: #" . $baris_str;
+
+                    $harga_dasar = $tr['sum_harga_dasar'];
+                    $biaya_jasa = $tr['sum_biaya_jasa'];
+                    $potongan = $tr['sum_potongan'];
+                    $ongkir = $tr['sum_ongkir'];
+                    
+                    // Total Biaya Kotor untuk row ini
+                    $total_material_jasa = $harga_dasar + $biaya_jasa;
+
+                    $total = $tr['sum_total_harga'];
+                    $dibayar = $tr['sum_dp_dibayar'];
+                    $pelunasan = $tr['sum_nominal_pelunasan'];
+                    
+                    // Murni harga yang tertagih per baris tanpa ongkir
+                    $subtotal_baris = $total_material_jasa;
+
+                    $grand_harga_dasar += $harga_dasar;
+                    $grand_biaya_jasa += $biaya_jasa;
+                    $grand_diskon += $potongan;
+                    $grand_ongkir += $ongkir;
+                    $grand_total += $total;
+                    $grand_dibayar += $dibayar;
+                    $grand_pelunasan += $pelunasan;
+                ?>
                 <tr>
                     <td class="text-center" style="vertical-align: top; color: #222;"><?= $no++ ?></td>
                     <td class="text-left" style="vertical-align: top; color: #222;">
-                        <b><?= $item['nama'] ?></b>
-                        <?php if(!empty($item['isi_paket'])): ?>
-                            <div style="font-size: 11px; color: #888; margin-top: 4px;">
-                                <?= implode('<br>', $item['isi_paket']) ?>
-                            </div>
-                        <?php endif; ?>
+                        <b style="font-size: 13px;">Jasa Tanam Bibit & Material</b><br>
+                        <span style="font-size: 10px; color: #555;"><?= $list_baris ?></span>
                     </td>
-                    <td class="text-center font-bold" style="vertical-align: top; color: #222;"><?= $item['qty'] ?></td>
-                    <td class="text-right" style="vertical-align: top; color: #222;"><?= formatRp($item['harga_satuan']) ?></td>
-                    <td class="text-right font-bold" style="vertical-align: top; color: #222;"><?= formatRp($item['jumlah_murni']) ?></td>
+                    <td class="text-center font-bold" style="vertical-align: top; color: #222;"><?= $qty_str ?></td>
+                    <?php
+                    $txt_harga_satuan = "";
+                    if($jml_iring > 0) {
+                        $harga_satuan_iring = $total_material_jasa / $jml_iring;
+                        $txt_harga_satuan = formatRp($harga_satuan_iring) . " <span style='font-size:10px; color:#555; font-weight:normal;'>/ Iring</span>";
+                    } else {
+                        $txt_harga_satuan = formatRp($total_material_jasa);
+                    }
+                    ?>
+                    <td class="text-right font-bold" style="vertical-align: top; color: #222;">
+                        <?= $txt_harga_satuan ?>
+                    </td>
+                    <td class="text-right font-bold" style="vertical-align: top; color: #222;"><?= formatRp($subtotal_baris) ?></td>
+                </tr>
+                <?php endforeach; 
+                
+                // BARIS BIAYA TAMBAHAN CUSTOM
+                foreach($biaya_tambahan as $bt): 
+                    if (empty($bt['is_in_db_total'])) {
+                        $grand_total += $bt['nominal'];
+                    }
+                ?>
+                <tr>
+                    <td class="text-center" style="vertical-align: top; color: #222;"><?= $no++ ?></td>
+                    <td class="text-left" style="vertical-align: top; color: #222;">
+                        <b style="font-size: 13px;"><?= htmlspecialchars($bt['nama_biaya']) ?></b>
+                    </td>
+                    <td class="text-center font-bold" style="vertical-align: top; color: #222;">-</td>
+                    <td class="text-right font-bold" style="vertical-align: top; color: #222;"><?= formatRp($bt['nominal']) ?></td>
+                    <td class="text-right font-bold" style="vertical-align: top; color: #222;"><?= formatRp($bt['nominal']) ?></td>
                 </tr>
                 <?php endforeach; ?>
+
+                <?php
+                // --- SUNTIKAN ANTI-BUG PEMBULATAN (ROUNDING) ---
+                $grand_harga_dasar = round($grand_harga_dasar, -1);
+                $grand_biaya_jasa = round($grand_biaya_jasa, -1);
+                $grand_diskon = round($grand_diskon, -1);
+                $grand_ongkir = round($grand_ongkir, -1);
+                $grand_total = round($grand_total, -1);
+                $grand_dibayar = round($grand_dibayar, -1);
+                $grand_pelunasan = round($grand_pelunasan, -1);
+                $grand_sisa = $grand_total - $grand_dibayar;
+                ?>
             </tbody>
         </table>
 
-        <!-- KALKULASI KEUANGAN AKHIR (SEMUA WARNA HITAM & PEMBULATAN ANTI-BUG) -->
+        <!-- KALKULASI KEUANGAN AKHIR -->
         <div class="calc-container">
             <table class="calc-table">
                 <tr>
-                    <td class="text-right">Total Harga Dasar</td>
-                    <td class="text-right">Rp <?= formatRp($grand_harga_dasar) ?></td>
+                    <td class="text-right">Subtotal</td>
+                    <td class="text-right">Rp <?= formatRp($grand_harga_dasar + $grand_biaya_jasa) ?></td>
                 </tr>
                 
                 <?php if($grand_diskon > 0): ?>
                 <tr>
-                    <td class="text-right">Total Diskon</td>
+                    <td class="text-right">Subtotal Diskon</td>
                     <td class="text-right font-bold">- Rp <?= formatRp($grand_diskon) ?></td>
                 </tr>
                 <?php endif; ?>
                 
                 <?php if($grand_ongkir > 0): ?>
                 <tr>
-                    <td class="text-right">Total Biaya Kirim</td>
+                    <td class="text-right">Subtotal Pengiriman</td>
                     <td class="text-right font-bold">+ Rp <?= formatRp($grand_ongkir) ?></td>
                 </tr>
                 <?php endif; ?>
@@ -325,11 +418,11 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
                 <?php if($jenis_cetak == 'lunas'): ?>
                     <tr class="border-top">
                         <td class="text-right font-bold" style="padding-top: 12px;">Total Akumulasi Tagihan</td>
-                        <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($total_akhir) ?></td>
+                        <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($grand_total) ?></td>
                     </tr>
                     <tr>
                         <td class="text-right">Telah Dibayar (DP Sebelumnya)</td>
-                        <td class="text-right font-bold">- Rp <?= formatRp($grand_dp) ?></td>
+                        <td class="text-right font-bold">- Rp <?= formatRp($grand_dibayar) ?></td>
                     </tr>
                     <tr class="grand-total">
                         <td class="text-right uppercase">PELUNASAN SEKARANG</td>
@@ -344,11 +437,11 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
                 <?php elseif($jenis_cetak == 'dp' || $grand_sisa > 0): ?>
                     <tr class="border-top">
                         <td class="text-right font-bold" style="padding-top: 12px;">Total Akumulasi Tagihan</td>
-                        <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($total_akhir) ?></td>
+                        <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($grand_total) ?></td>
                     </tr>
                     <tr>
                         <td class="text-right">Telah Dibayar (DP)</td>
-                        <td class="text-right font-bold">- Rp <?= formatRp($grand_dp) ?></td>
+                        <td class="text-right font-bold">- Rp <?= formatRp($grand_dibayar) ?></td>
                     </tr>
                     <tr class="grand-total">
                         <td class="text-right uppercase">TOTAL SISA BAYAR</td>
@@ -363,15 +456,15 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
                 <?php else: ?>
                     <tr class="border-top">
                         <td class="text-right font-bold" style="padding-top: 12px;">Total Akumulasi Tagihan</td>
-                        <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($total_akhir) ?></td>
+                        <td class="text-right font-bold" style="padding-top: 12px;">Rp <?= formatRp($grand_total) ?></td>
                     </tr>
                     <tr class="grand-total">
                         <td class="text-right uppercase">TOTAL TELAH DIBAYAR (LUNAS)</td>
-                        <td class="text-right font-bold">Rp <?= formatRp($grand_dp + $grand_pelunasan) ?></td>
+                        <td class="text-right font-bold">Rp <?= formatRp($grand_dibayar + $grand_pelunasan) ?></td>
                     </tr>
             </table>
             <div class="terbilang-right">
-                Terbilang: <?= ucwords(terbilang($total_akhir)) ?> Rupiah
+                Terbilang: <?= ucwords(terbilang($grand_total)) ?> Rupiah
             </div>
                 <?php endif; ?>
         </div>
@@ -381,7 +474,7 @@ $judul_dokumen = $safe_id_order . " - " . $nama_file . " - " . $alamat_file;
             <div class="signature">
                 <div class="sig-title">Hormat Kami,</div>
                 <div class="ttd-img-container">
-                    <!-- STEMPEL DAN TTD DENGAN ../assets/ & UKURAN LEBIH BESAR -->
+                    <!-- STEMPEL DAN TTD DENGAN ../assets/ -->
                     <img src="../assets/stempel.png" alt="" class="img-cap" onerror="this.style.display='none'">
                     <img src="../assets/ttd.png" alt="" class="img-ttd" onerror="this.style.display='none'">
                 </div>
