@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 // 1. AUTO-CREATE TABEL PENGATURAN SISTEM
 mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `pengaturan_sistem` (

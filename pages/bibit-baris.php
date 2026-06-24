@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 $tgl_hari_ini = date('Y-m-d');
 

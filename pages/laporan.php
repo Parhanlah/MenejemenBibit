@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 // Auto-migrate kolom yang dibutuhkan jika diakses sebelum membuka order-bibit/order-pupuk
 if(mysqli_num_rows(mysqli_query($conn, "SHOW COLUMNS FROM order_bibit LIKE 'nominal_pelunasan'")) == 0) {

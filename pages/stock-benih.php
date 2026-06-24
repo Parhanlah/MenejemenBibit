@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php'; // Panggil koneksi database
+include __DIR__ . '/../components/koneksi.php'; // Panggil koneksi database
 
 // Ambil semua data kategori dari database
 $query = "SELECT * FROM kategori_bibit ORDER BY id DESC";

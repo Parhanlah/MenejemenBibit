@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 // =========================================================================
 // 1. LOGIKA PENANGGALAN KALENDER

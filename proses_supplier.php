@@ -1,6 +1,6 @@
 <?php
 error_reporting(0); // Matikan error sementara agar format JSON tidak rusak
-include 'components/koneksi.php';
+include __DIR__ . '/components/koneksi.php';
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     header('Content-Type: application/json');

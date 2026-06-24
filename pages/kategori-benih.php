@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php'; // Panggil koneksi database
+include __DIR__ . '/../components/koneksi.php'; // Panggil koneksi database
 
 // ==========================================
 // LOGIKA CRUD (CREATE, UPDATE, DELETE)

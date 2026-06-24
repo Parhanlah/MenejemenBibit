@@ -1,5 +1,5 @@
 <?php
-include 'c:/xampp/htdocs/Poncotaniweb/components/koneksi.php';
+include __DIR__ . '/components/koneksi.php';
 
 $tables = ['order_bibit', 'order_pupuk'];
 foreach($tables as $t) {

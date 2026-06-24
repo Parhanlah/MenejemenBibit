@@ -1,6 +1,6 @@
 <?php
 // Keluar dari folder cetak/ lalu masuk ke components/
-include '../components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 // Ambil parameter dari URL khusus Bibit (berdasarkan Nama & HP)
 $nama_pelanggan = isset($_GET['nama']) ? mysqli_real_escape_string($conn, $_GET['nama']) : '';

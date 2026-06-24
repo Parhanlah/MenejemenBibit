@@ -1,6 +1,6 @@
 <?php
 // Keluar dari folder cetak/ lalu masuk ke components/
-include '../components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 $id_order = isset($_GET['id']) ? mysqli_real_escape_string($conn, $_GET['id']) : '';
 $jenis_cetak = isset($_GET['jenis']) ? $_GET['jenis'] : '';

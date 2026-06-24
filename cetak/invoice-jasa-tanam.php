@@ -1,6 +1,6 @@
 <?php
 // Keluar dari folder cetak/ lalu masuk ke components/
-include '../components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 $no_order = isset($_GET['no_order']) ? mysqli_real_escape_string($conn, $_GET['no_order']) : '';
 

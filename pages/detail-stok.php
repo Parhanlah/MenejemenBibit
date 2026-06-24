@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 $slug = isset($_GET['slug']) ? mysqli_real_escape_string($conn, $_GET['slug']) : '';
 
 // =========================================================================

@@ -1,5 +1,5 @@
 <?php
-include 'components/koneksi.php';
+include __DIR__ . '/../components/koneksi.php';
 
 // Helper Format Rupiah
 if (!function_exists('formatRp')) {
